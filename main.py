@@ -5,11 +5,15 @@ Executes the testbench.
 """
 
 import os
+import gc
 import sys
 import json
 import argparse
 from datetime import datetime
 from sklearn.model_selection import train_test_split
+from scripts.model_interface import TorchvisionBackend, HuggingFaceVisionBackend
+import torch
+import tensorflow as tf
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
 
@@ -128,14 +132,13 @@ def main():
         )
 
         # FIXME: Can change if using better compute resources
-        train_size = 7000
+        train_size = 5000
         
         if len(metadata_df) > train_size:
             metadata_df, _ = train_test_split(metadata_df, train_size = train_size, \
             stratify = metadata_df[label_col], random_state = 42)
             print(f"Dataset stratified and downsampled to {train_size} examples." + \
                   " Adjust as needed by editing main.py.")
-
 
         # Extract embeddings
         embeddings, image_paths = extract_embeddings(
@@ -158,6 +161,15 @@ def main():
         # Save results
         results_path = os.path.join(run_folder, f"{dataset_name}.json")
         write_json(results, results_path)
+
+        # Clean up RAM
+        gc.collect()
+
+        # FIXME: Clean up VRAM (GPUs)
+        if isinstance(backend, (TorchvisionBackend, HuggingFaceVisionBackend)):
+            torch.cuda.empty_cache()
+        else:
+            tf.keras.backend.clear_session()
 
         print(f"\n=== Dataset Complete ===\n\n")
     
