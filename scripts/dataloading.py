@@ -17,14 +17,15 @@ DATASET_MAP = {
     "pad_ufes": {"dataset_path": kagglehub.dataset_download("mahdavi1202/skin-cancer"),
             "CSV_NAMES": ["metadata.csv"]},
     "chexpert": {"dataset_path": kagglehub.dataset_download("ashery/chexpert"),
-            "CSV_NAMES": ["train.csv"]},
+            "CSV_NAMES": ["train.csv"], "IMAGE_DIRECTORY": "train"},
     "cbis_ddsm": {"dataset_path": kagglehub.dataset_download("awsaf49/cbis-ddsm-breast-cancer-image-dataset"),
             "CSV_NAMES": ["dicom_info.csv", "calc_case_description_train_set.csv", "mass_case_description_train_set.csv"]},
     "odir": {"dataset_path": kagglehub.dataset_download("andrewmvd/ocular-disease-recognition-odir5k"),
             "CSV_NAMES": ["full_df.csv"],
             "IMAGE_DIRECTORY": f"ODIR-5K{os.sep}Training Images"},
     "ham10000": {"dataset_path": kagglehub.dataset_download("kmader/skin-cancer-mnist-ham10000"),
-            "CSV_NAMES": ["HAM10000_metadata.csv"]}
+            "CSV_NAMES": ["HAM10000_metadata.csv"],
+            "IMAGE_DIRECTORY": ["ham10000_images_part_1","ham10000_images_part_2"]}
 }
 
 # GeneralDataset class for various datasets for use in pipeline, inherits from PyTorch's Dataset class
@@ -62,8 +63,10 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
     if dataset_name in DATASET_MAP:
         dataset_path = DATASET_MAP[dataset_name]["dataset_path"]
         CSV_NAMES = DATASET_MAP[dataset_name]["CSV_NAMES"]
-        if dataset_name == "odir":
+        try:
             IMAGE_DIRECTORY = DATASET_MAP[dataset_name]["IMAGE_DIRECTORY"]
+        except KeyError:
+            pass
     else:
         raise ValueError(f"Dataset \"{dataset_name}\" not recognized.")
     
@@ -119,7 +122,10 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
                 if file.endswith(".csv") and file in CSV_NAMES:
                     csv_paths.append(os.path.join(dirpath, file))
                 elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith("."):
-                    image_paths.append(os.path.join(dirpath, file))
+                    for dirname in IMAGE_DIRECTORY:
+                        if dirname in dirpath:
+                            image_paths.append(os.path.join(dirpath, file))
+                            break
             if len(dirnames) != 0:
                 continue
         
@@ -141,7 +147,8 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
                 if file.endswith(".csv") and file in CSV_NAMES:
                     csv_paths.append(os.path.join(dirpath, file))
                 elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith("."):
-                    image_paths.append(os.path.join(dirpath, file))
+                    if IMAGE_DIRECTORY in dirpath:
+                        image_paths.append(os.path.join(dirpath, file))
             if len(dirnames) != 0:
                 continue
         
@@ -170,8 +177,9 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             for file in filenames:
                 if file.endswith(".csv") and file in CSV_NAMES:
                     csv_paths.append(os.path.join(dirpath, file))
-                elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith(".") and IMAGE_DIRECTORY in dirpath:
-                    image_paths.append(os.path.join(dirpath, file))
+                elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith("."):
+                    if IMAGE_DIRECTORY in dirpath:
+                        image_paths.append(os.path.join(dirpath, file))
             if len(dirnames) != 0:
                 continue
 
@@ -199,7 +207,9 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
 
     general_dataset = GeneralDataset(metadata_df, image_paths, transform)
 
-    dataloader = DataLoader(general_dataset, batch_size, shuffle, collate_fn = lambda batch : list(zip(*batch)))
+    # FIXME: Edit num_workers as needed
+    dataloader = DataLoader(general_dataset, batch_size, shuffle, \
+            collate_fn = lambda batch : list(zip(*batch)), num_workers = 2)
     dataloader.dataset_name = dataset_name
     
     return dataloader, metadata_df

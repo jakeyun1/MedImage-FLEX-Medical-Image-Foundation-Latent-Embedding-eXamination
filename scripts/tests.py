@@ -410,9 +410,13 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         Function used by Optuna to maximize LR performance.
         """
         c_value = trial.suggest_float("C", 1e-3, 1e2, log = True)
-        # "lbfgs" is standard but "liblinear" is good for high dims too
+
+        if len(X) > 20000:
+            solver = "saga"
+        else:
+            solver = "lbfgs"
         
-        base_clf = LogisticRegression(C = c_value, max_iter = 2000, class_weight = "balanced", solver = "lbfgs")
+        base_clf = LogisticRegression(C = c_value, max_iter = 2000, class_weight = "balanced", solver = solver)
         
         if is_multilabel:
             clf = MultiOutputClassifier(base_clf)

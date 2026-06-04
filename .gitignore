@@ -5,3 +5,4 @@ embeddings/
 results/
 configs/
 scripts/__pycache__/
+*.sh

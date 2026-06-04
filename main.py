@@ -162,15 +162,6 @@ def main():
         results_path = os.path.join(run_folder, f"{dataset_name}.json")
         write_json(results, results_path)
 
-        # Clean up RAM
-        gc.collect()
-
-        # FIXME: Clean up VRAM (GPUs)
-        if isinstance(backend, (TorchvisionBackend, HuggingFaceVisionBackend)):
-            torch.cuda.empty_cache()
-        else:
-            tf.keras.backend.clear_session()
-
         print(f"\n=== Dataset Complete ===\n\n")
     
     print(f"=== Benchmark Complete ===")

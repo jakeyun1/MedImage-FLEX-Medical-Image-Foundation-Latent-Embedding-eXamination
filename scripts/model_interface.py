@@ -56,7 +56,7 @@ class TorchvisionBackend(EmbeddingBackend):
         
         Changed for each specific model.
         """
-        # ResNet50
+        # ResNet50/DenseNet121
         transform = transforms.Compose([
             transforms.Resize(self.target_size),
             transforms.ToTensor(),
@@ -93,6 +93,7 @@ class HuggingFaceVisionBackend(EmbeddingBackend):
         super().__init__(model_id, device)
         self.target_size = tuple(target_size)
         self.model = AutoModel.from_pretrained(model_id, trust_remote_code = True).to(device).eval()
+        
         # Try three different ways to load an image processor 
         try:
             self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code = True, use_fast = True)
@@ -130,6 +131,25 @@ class HuggingFaceVisionBackend(EmbeddingBackend):
         # If the model exposes image-only API: `get_image_features`
         if hasattr(self.model, "get_image_features"):
             embs = self.model.get_image_features(pixel_values = pixel_values)
+            
+            # Catch newer HF versions returning an Output object instead of a tensor
+            if not isinstance(embs, torch.Tensor):
+                # Use user-provided key if it exists
+                if self.output_key is not None:
+                    return embs[self.output_key]
+                
+                # Auto-detect and save the key for future batches
+                for key in ["image_embeds", "pooler_output"]:
+                    if key in embs and embs[key] is not None:
+                        self.output_key = key
+                        return embs[self.output_key]
+                
+                # Fallback: grab the first tensor we find
+                for k, v in embs.items():
+                    if isinstance(v, torch.Tensor):
+                        self.output_key = k
+                        return embs[self.output_key]
+
             return embs
 
         # Otherwise, assume it's a vision-only model where forward(pixel_values = pass) works
