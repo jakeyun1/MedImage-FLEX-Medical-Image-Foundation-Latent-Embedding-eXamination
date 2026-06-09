@@ -5,15 +5,11 @@ Executes the testbench.
 """
 
 import os
-import gc
 import sys
 import json
 import argparse
 from datetime import datetime
 from sklearn.model_selection import train_test_split
-from scripts.model_interface import TorchvisionBackend, HuggingFaceVisionBackend
-import torch
-import tensorflow as tf
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
 
