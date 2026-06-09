@@ -411,6 +411,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         """
         c_value = trial.suggest_float("C", 1e-3, 1e2, log = True)
 
+        # FIXME: Edit as necessary
         if len(X) > 20000:
             solver = "saga"
         else:
@@ -426,7 +427,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         pipe = Pipeline([("std", StandardScaler()), ("clf", clf)])
         
         # Use 3-fold for speed during tuning
-        return cross_val_score(pipe, X, y, cv=3, scoring = scoring_auc, n_jobs = -1).mean()
+        return cross_val_score(pipe, X, y, cv = 3, scoring = scoring_auc, n_jobs = -1).mean()
     
     study = optuna.create_study(direction = "maximize")
     study.optimize(objective, n_trials = n_trials)
