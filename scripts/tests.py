@@ -409,7 +409,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         """
         Function used by Optuna to maximize LR performance.
         """
-        c_value = trial.suggest_float("C", 1e-3, 1e2, log = True)
+        c_value = trial.suggest_float("C", 1e-3, 10, log = True)
 
         # FIXME: Edit as necessary
         if len(X) > 20000:
