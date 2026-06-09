@@ -10,7 +10,7 @@ conda create -n testbench python=3.10.19
 conda activate testbench
 ```
 2. Clone the GitHub repo
-3. Navigate into to [`environment`](environment) and run `python setup.py` to download dependencies
+3. Navigate into to [`environment`](environment/) and run `python setup.py` to download dependencies
 ```
 cd environment
 python setup.py
@@ -24,6 +24,6 @@ cd ..
 ```
 python main.py --config path_to_config_json
 ```
-5. If the model requires specific image preprocessing not handled by default, edit `model_interface.EmbeddingBackend.get_transform` for the model's framework (PyTorch, HuggingFace, or TensorFlow)
+5. If the model requires specific logic not handled by default, edit [`scripts/model_interface.py`](scripts/model_interface.py) for the model's framework (PyTorch, HuggingFace, or TensorFlow)
 
 **NOTE: Any personal access tokens or keys for models must be loaded locally**
