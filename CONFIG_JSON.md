@@ -1,4 +1,4 @@
-# Configuration JSON Format #
+# Configuration JSON Format
 ```
 # Format
 {
@@ -21,6 +21,11 @@
         "shuffle": Flag for shuffling images while
                    computing embeddings
                    (optional, default is false)
+    },
+
+    "embeddings": {
+        "normalize": Flag for normalizing embeddings (optional, default is True)
+        "cache": Flag for caching embeddings (optional, default is False)
     }
 }
 
@@ -40,11 +45,15 @@
         "batch_size": 20,
 
         "shuffle": false
+    },
+
+    "embeddings": {
+        "cache": True
     }
 }
 ```
 
-## Datasets ##
+## Datasets
 - **Chest radiographs**
     - CheXpert: `"chexpert"`
 - **Skin lesions**
@@ -55,7 +64,7 @@
 - **Ocular fundi**
     - ODIR-5K: `"odir"`
 
-## Citations ##
+## Citations
 Irvin et al. CheXpert Chest X-rays. Stanford AIMI, 2025. doi:10.71718/y7pj-4v93.​
 
 Pacheco et al. PAD-UFES-20: Skin lesions from smartphones. Mendeley Data, 2020. doi:10.17632/zr7vgbcyr2.1.​
