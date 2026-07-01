@@ -5,7 +5,6 @@ Executes the testbench.
 """
 
 import os
-import sys
 import json
 import argparse
 from datetime import datetime
@@ -24,8 +23,6 @@ LABEL_COL_IDX = 1
 # Make the current directory (for the subprocess) relative to the testbench
 script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
-
-python = sys.executable
 
 def clean_name(name, desired_char):
     """
