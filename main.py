@@ -7,7 +7,9 @@ Executes the testbench.
 import os
 import json
 import argparse
+import numpy as np
 from datetime import datetime
+from time import perf_counter
 from sklearn.model_selection import train_test_split
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
@@ -105,6 +107,7 @@ def main():
     print(f"Output folder: {os.path.abspath(run_folder)}\n")
 
     for dataset_name in datasets:
+        dataset_start = perf_counter()
         print(f"Dataset: {dataset_name}")
 
         id_col = DATASET_COL_MAP[dataset_name][ID_COL_IDX]
@@ -117,12 +120,14 @@ def main():
         # HF backend returns None here; dataset will return PIL images (still works)
         transform = backend.get_transform()
 
+        load_start = perf_counter()
         dataloader, metadata_df = load_dataset(
             dataset_name,
             transform = transform,
             batch_size = batch_size,
             shuffle = shuffle
         )
+        dataset_loading_seconds = perf_counter() - load_start
 
         # FIXME: Can change if using better compute resources
         train_size = 5000
@@ -134,12 +139,15 @@ def main():
                   " Adjust as needed by editing main.py.")
 
         # Extract embeddings
-        embeddings, image_paths = extract_embeddings(
+        embedding_start = perf_counter()
+        embeddings, image_paths, embedding_metadata = extract_embeddings(
             dataloader,
             backend,
             normalize = normalize_embeddings,
-            cache = cache_embeddings
+            cache = cache_embeddings,
+            return_metadata = True
         )
+        embedding_seconds = perf_counter() - embedding_start
 
         # Run benchmark suite
         results = run_benchmark(
@@ -150,6 +158,25 @@ def main():
             id_col = id_col,
             label_col = label_col
         )
+        emb_array = np.asarray(embeddings)
+        results["embedding_info"] = {
+            "model_id": model_id,
+            "embedding_dim": int(emb_array.shape[1]) if emb_array.ndim > 1 else 1,
+            "normalized": normalize_embeddings,
+            "n_embeddings": int(emb_array.shape[0]),
+            "source": embedding_metadata["source"]
+        }
+        results["runtime"]["includes"] = {
+            "dataset_loading": True,
+            "embedding_extraction": True,
+            "benchmark_tests": True,
+            "json_writing": False,
+            "dataset_download": False,
+            "environment_setup": False
+        }
+        results["runtime"]["stages"]["dataset_loading"] = float(dataset_loading_seconds)
+        results["runtime"]["stages"]["embedding_extraction"] = float(embedding_seconds)
+        results["runtime"]["stages"]["total_dataset_run"] = float(perf_counter() - dataset_start)
 
         # Save results
         results_path = os.path.join(run_folder, f"{dataset_name}.json")

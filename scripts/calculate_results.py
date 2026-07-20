@@ -178,15 +178,24 @@ def compute_clustering_averages(json_list):
             dataset_results = json.load(f)
         
         # WARNING: accumulator indices are hardcoded due to dataset results JSON structure
-        # Best k
+        # Primary k
         dataset = os.path.basename(file)[:-5]
         task = TASK_MAP[dataset]
+        clustering_result = dataset_results["clustering"]
+        primary_nmi = clustering_result.get("class_count_k")
 
-        accumulator[0][task] = [dataset_results["clustering"]["best_nmi"][0]] if task not in accumulator[0] \
-                else accumulator[0][task] + [dataset_results["clustering"]["best_nmi"][0]]
+        if primary_nmi is None:
+            primary_k = clustering_result["best_nmi"][0]
+            primary_score = clustering_result["best_nmi"][1]
+        else:
+            primary_k = primary_nmi["k"]
+            primary_score = primary_nmi["NMI"]
+
+        accumulator[0][task] = [primary_k] if task not in accumulator[0] \
+                else accumulator[0][task] + [primary_k]
 
         # NMI
-        accumulator.append(dataset_results["clustering"]["best_nmi"][1])
+        accumulator.append(primary_score)
 
     # Compute average and std dev
     accumulator[0] = {task:int(np.round(np.mean(k_list))) for task, k_list in accumulator[0].items()}
@@ -265,7 +274,7 @@ with open(full_path, "w") as f:
 message = f"\n{filename} has been created at " + \
         f"{os.sep.join(os.path.dirname(os.path.abspath(filename)).split(os.sep)[-2:])}.\n"
 
-width = os.get_terminal_size().columns
+width = os.get_terminal_size().columns if os.isatty(1) else 80
 print("=" * width)
 print(message)
 print("=" * width)

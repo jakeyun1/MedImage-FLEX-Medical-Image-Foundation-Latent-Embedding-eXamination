@@ -11,7 +11,8 @@ from tqdm import tqdm
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|"]
 
-def extract_embeddings(dataloader, backend: EmbeddingBackend, normalize = True, cache = False):
+def extract_embeddings(dataloader, backend: EmbeddingBackend, normalize = True, cache = False,
+                       return_metadata = False):
     """
     Extracts the embeddings for a given model from a given dataset.
 
@@ -20,6 +21,7 @@ def extract_embeddings(dataloader, backend: EmbeddingBackend, normalize = True, 
         backend : EmbeddingBackend object used to reference a model
         normalize : If True, embeddings are normalized
         cache : If True, embeddings are stored locally to prevent future recomputation
+        return_metadata : If True, include embedding source metadata
     
     Returns:
         all_embs : A list of all embeddings - one per image
@@ -53,7 +55,10 @@ def extract_embeddings(dataloader, backend: EmbeddingBackend, normalize = True, 
         print(f"Embeddings file detected! Loading \'{os.path.abspath(filepath)}\'")
         all_embs = np.load(filepath)
         all_paths = dataloader.dataset.image_paths
-        
+
+        if return_metadata:
+            return all_embs, all_paths, {"source": "cache"}
+
         return all_embs, all_paths
 
     for batch in tqdm(dataloader, desc = "Extracting embeddings"):
@@ -75,5 +80,8 @@ def extract_embeddings(dataloader, backend: EmbeddingBackend, normalize = True, 
         if not os.path.exists(filepath):
             np.save(filepath, all_embs)
             print(f"Embeddings cached to: {os.path.abspath(filepath)}\n")
+
+    if return_metadata:
+        return all_embs, all_paths, {"source": "computed"}
 
     return all_embs, all_paths

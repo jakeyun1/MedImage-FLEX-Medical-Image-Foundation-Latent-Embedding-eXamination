@@ -4,7 +4,13 @@ run_benchmark.py
 This file executes the testbench.
 """
 
+from time import perf_counter
 from scripts.tests import *
+
+def timed_call(fn, *args, **kwargs):
+    start = perf_counter()
+    result = fn(*args, **kwargs)
+    return result, perf_counter() - start
 
 def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col):
     """
@@ -22,33 +28,40 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         results : A map containing the formatted results (JSON-ready) for each adapter
     """
     # MLP
-    mlp_summary = MLP_cv(dataset_name, embeddings, metadata_df,
-                         image_paths, id_col = id_col, label_col = label_col, n_splits = 5)
+    mlp_summary, mlp_seconds = timed_call(
+        MLP_cv, dataset_name, embeddings, metadata_df,
+        image_paths, id_col = id_col, label_col = label_col, n_splits = 5
+    )
     print(f"Completed MLP CV benchmark on {dataset_name}.\n")
 
     # KNN
-    knn_summary = KNN_cv(
-        dataset_name, embeddings, metadata_df, image_paths,
+    knn_summary, knn_seconds = timed_call(
+        KNN_cv, dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col, n_splits = 5
     )
 
     print(f"Completed KNN CV benchmark on {dataset_name}.\n")
 
     # LR
-    logreg_summary = logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, id_col = id_col,
-                                     label_col = label_col, n_splits = 5)
+    logreg_summary, logreg_seconds = timed_call(
+        logistic_regression_cv, dataset_name, embeddings, metadata_df, image_paths,
+        id_col = id_col, label_col = label_col, n_splits = 5
+    )
     print(f"Completed Logistic Regression CV benchmarks on {dataset_name}.\n")
 
     # Retrieval
-    ret_results = retrieval_eval(dataset_name, embeddings, metadata_df, image_paths,
-                     id_col = id_col, label_col = label_col, ks = (1,5,10), per_class=True)
+    ret_results, retrieval_seconds = timed_call(
+        retrieval_eval, dataset_name, embeddings, metadata_df, image_paths,
+        id_col = id_col, label_col = label_col, ks = (1,5,10), per_class=True
+    )
     print(f"Completed retrieval evaluation on {dataset_name}.\n")
 
     # Clustering
-    clustering_results = clustering_eval(
-    dataset_name, embeddings, metadata_df, image_paths,
-    id_col = id_col, label_col = label_col,
-    k_range = range(2, 12)
+    clustering_results, clustering_seconds = timed_call(
+        clustering_eval,
+        dataset_name, embeddings, metadata_df, image_paths,
+        id_col = id_col, label_col = label_col,
+        k_range = range(2, 12)
     )
     print(f"Completed clustering evaluation on {dataset_name}.\n\n")
 
@@ -58,7 +71,19 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         "knn_cv": knn_summary,
         "logreg_cv": logreg_summary,
         "retrieval": ret_results,
-        "clustering": clustering_results
+        "clustering": clustering_results,
+        "runtime": {
+            "unit": "seconds",
+            "timer": "time.perf_counter",
+            "scope": "single_process_wall_clock",
+            "stages": {
+                "mlp_cv": float(mlp_seconds),
+                "knn_cv": float(knn_seconds),
+                "logreg_cv": float(logreg_seconds),
+                "retrieval": float(retrieval_seconds),
+                "clustering": float(clustering_seconds)
+            }
+        }
     }
 
     # Results are ready to be formatted into a JSON file (json.dump)

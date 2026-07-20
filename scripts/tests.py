@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 import optuna
 from sklearn.preprocessing import LabelEncoder, StandardScaler, Normalizer
-from sklearn.metrics import f1_score, roc_auc_score, precision_score, make_scorer
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, precision_recall_fscore_support
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, KFold, cross_validate, cross_val_score
+from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
@@ -145,6 +145,115 @@ def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, 
 
 ### Adapter test functions ###
 
+def _cv_splitter(is_multilabel, n_splits, random_state):
+    if is_multilabel:
+        return KFold(n_splits = n_splits, shuffle = True, random_state = random_state)
+
+    return StratifiedKFold(n_splits = n_splits, shuffle = True, random_state = random_state)
+
+def _inner_cv_splitter(is_multilabel, y, n_splits, random_state):
+    if is_multilabel:
+        return _cv_splitter(is_multilabel, n_splits, random_state)
+
+    _, counts = np.unique(y, return_counts = True)
+    safe_splits = min(n_splits, int(counts.min()))
+    if safe_splits < 2:
+        raise ValueError("At least two samples per class are required for inner cross-validation.")
+
+    return _cv_splitter(is_multilabel, safe_splits, random_state)
+
+def _split_iter(cv, X, y, is_multilabel):
+    if is_multilabel:
+        return cv.split(X)
+
+    return cv.split(X, y)
+
+def _extract_positive_proba(proba):
+    if isinstance(proba, list):
+        return np.transpose([p[:, 1] for p in proba])
+
+    return proba
+
+def _dataset_info(dataset_name, y, classes, label_type):
+    if label_type == "multilabel":
+        counts = np.asarray(y).sum(axis = 0)
+    else:
+        counts = np.bincount(np.asarray(y), minlength = len(classes))
+
+    return {
+        "dataset_name": dataset_name,
+        "n_samples": int(len(y)),
+        "n_classes": int(len(classes)),
+        "classes": [str(cls) for cls in classes],
+        "class_counts": {str(cls): int(counts[idx]) for idx, cls in enumerate(classes)},
+        "label_type": label_type
+    }
+
+def _multiclass_probe_label_type(dataset_name):
+    if dataset_name == "chexpert":
+        return "multilabel_combinations"
+
+    return "multiclass"
+
+def _per_class_metrics(y_true, y_pred, classes, is_multilabel):
+    labels = None if is_multilabel else np.arange(len(classes))
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        labels = labels,
+        average = None,
+        zero_division = 0
+    )
+
+    if is_multilabel:
+        support = np.asarray(y_true).sum(axis = 0)
+
+    return {
+        str(cls): {
+            "precision": float(precision[idx]),
+            "recall": float(recall[idx]),
+            "f1": float(f1[idx]),
+            "support": int(support[idx])
+        }
+        for idx, cls in enumerate(classes)
+    }
+
+def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None):
+    if y_pred is None:
+        y_pred = pipe.predict(X_test)
+
+    scores = {
+        "accuracy": accuracy_score(y_test, y_pred),
+        "f1_weighted": f1_score(y_test, y_pred, average = "weighted", zero_division = 0),
+        "precision_weighted": precision_score(y_test, y_pred, average = "weighted", zero_division = 0),
+    }
+
+    proba = _extract_positive_proba(pipe.predict_proba(X_test))
+
+    if is_multilabel:
+        scores["roc_auc"] = roc_auc_score(y_test, proba, average = "macro")
+    elif proba.shape[1] == 2:
+        scores["roc_auc"] = roc_auc_score(y_test, proba[:, 1])
+    else:
+        scores["roc_auc"] = roc_auc_score(y_test, proba, multi_class = "ovr", average = "macro")
+
+    return scores
+
+def _fold_summary(fold_idx, scores):
+    fold_result = {"fold": int(fold_idx)}
+    fold_result.update({metric: float(score) for metric, score in scores.items()})
+    return fold_result
+
+def _summarize_fold_scores(fold_scores):
+    return {
+        metric: [float(np.mean(values)), float(np.std(values))]
+        for metric, values in fold_scores.items()
+    }
+
+def _most_common_params(params_by_fold):
+    counts = Counter(tuple(sorted(params.items())) for params in params_by_fold)
+    return dict(counts.most_common(1)[0][0])
+
 
 def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
            label_col, n_splits = 5, random_state = 42, n_trials = 20):
@@ -168,93 +277,107 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
                                                 image_paths, id_col, label_col)
 
-    if is_multilabel:
-        cv = KFold(n_splits = n_splits, shuffle = True, random_state = random_state)
-        # "roc_auc" in sklearn defaults to macro average for multilabel in modern versions
-        scoring_auc = "roc_auc"
-    else:
-        cv = StratifiedKFold(n_splits = n_splits, shuffle = True, random_state = random_state)
-        scoring_auc = "roc_auc" if len(classes) == 2 else "roc_auc_ovr"
-    
+    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
+
     print(f"--- Optimizing MLP with Optuna ({n_trials} trials) ---")
 
-    def objective(trial):
-        """
-        Function used by Optuna to maximize MLP performance.
-        """
-        # 1. Suggest Hyperparameters
-        hidden_layer_choice = trial.suggest_categorical("hidden_layers", ["small", "medium", "large"])
-        if hidden_layer_choice == "small":
-            layers = (64,)
-        elif hidden_layer_choice == "medium":
-            layers = (128, 64)
-        else:
-            layers = (256, 128, 64)
-
-        lr_init = trial.suggest_float("learning_rate_init", 1e-4, 1e-2, log = True)
-        alpha = trial.suggest_float("alpha", 1e-5, 1e-2, log = True)
-        activation = trial.suggest_categorical("activation", ["relu", "tanh"])
-
-        # 2. Build Pipeline
+    def build_pipe(params, max_iter):
+        best_layers_map = {"small": (64,), "medium": (128, 64), "large": (256, 128, 64)}
         clf = MLPClassifier(
-            hidden_layer_sizes = layers,
-            activation = activation,
-            learning_rate_init = lr_init,
-            alpha = alpha,
+            hidden_layer_sizes = best_layers_map[params["hidden_layers"]],
+            activation = params["activation"],
+            learning_rate_init = params["learning_rate_init"],
+            alpha = params["alpha"],
             batch_size = 256,
-            max_iter = 300, # Slightly lower for tuning speed
+            max_iter = max_iter,
             early_stopping = True,
             n_iter_no_change = 10,
             random_state = random_state
         )
-        
-        pipeline = Pipeline([("scaler", StandardScaler()), ("mlp", clf)])
 
-        # 3. Fast Evaluation (accuracy is usually faster/stable for tuning, but AUC is better quality)
-        # Using accuracy for speed in loop, or main_metric if feasible.
-        scores = cross_val_score(pipeline, X, y, cv = 3, scoring = "roc_auc" if is_multilabel else scoring_auc, n_jobs = -1)
-        return scores.mean()
-    
-     # Run Optimization
-    study = optuna.create_study(direction = "maximize")
-    study.optimize(objective, n_trials = n_trials)
+        return Pipeline([("scaler", StandardScaler()), ("mlp", clf)])
 
-    # Reconstruct Best Model
-    best_layers_map = {"small": (64,), "medium": (128, 64), "large": (256, 128, 64)}
-    best_clf = MLPClassifier(
-        hidden_layer_sizes = best_layers_map[study.best_params["hidden_layers"]],
-        activation = study.best_params["activation"],
-        learning_rate_init = study.best_params["learning_rate_init"],
-        alpha = study.best_params["alpha"],
-        batch_size = 256,
-        max_iter = 500, # Full training
-        early_stopping = True,
-        random_state = random_state
+    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    fold_score_rows = []
+    best_params_by_fold = []
+    inner_folds_by_fold = []
+    y_true_parts = []
+    y_pred_parts = []
+
+    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
+        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
+
+        def objective(trial):
+            """
+            Function used by Optuna to maximize MLP performance.
+            """
+            # 1. Suggest Hyperparameters
+            params = {
+                "hidden_layers": trial.suggest_categorical("hidden_layers", ["small", "medium", "large"]),
+                "learning_rate_init": trial.suggest_float("learning_rate_init", 1e-4, 1e-2, log = True),
+                "alpha": trial.suggest_float("alpha", 1e-5, 1e-2, log = True),
+                "activation": trial.suggest_categorical("activation", ["relu", "tanh"])
+            }
+
+            pipeline = build_pipe(params, max_iter = 300)
+            scores = cross_val_score(
+                pipeline, X_train, y_train,
+                cv = inner_cv,
+                scoring = scoring_auc,
+                n_jobs = -1
+            )
+            return scores.mean()
+
+        study = optuna.create_study(direction = "maximize")
+        study.optimize(objective, n_trials = n_trials)
+        best_params_by_fold.append(study.best_params)
+
+        final_pipe = build_pipe(study.best_params, max_iter = 500)
+        final_pipe.fit(X_train, y_train)
+        y_pred = final_pipe.predict(X_test)
+        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+
+        for metric, score in scores.items():
+            fold_scores[metric].append(float(score))
+
+        fold_score_rows.append(_fold_summary(fold_idx, scores))
+        y_true_parts.append(y_test)
+        y_pred_parts.append(y_pred)
+
+        print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
+
+    summary = _summarize_fold_scores(fold_scores)
+    summary["classes"] = classes
+    summary["best_params"] = _most_common_params(best_params_by_fold)
+    summary["best_params_by_fold"] = best_params_by_fold
+    summary["fold_scores"] = fold_score_rows
+    summary["per_class"] = _per_class_metrics(
+        np.concatenate(y_true_parts),
+        np.concatenate(y_pred_parts),
+        classes,
+        is_multilabel
     )
-
-    final_pipe = Pipeline([("scaler", StandardScaler()), ("mlp", best_clf)])
-
-    # use built-in scorer names
-    scorers = {
-        "accuracy": "accuracy",
-        "f1_weighted": "f1_weighted",
-        "precision_weighted": "precision_weighted",
-        "roc_auc": scoring_auc
+    summary["dataset_info"] = _dataset_info(
+        dataset_name,
+        y,
+        classes,
+        "multilabel" if is_multilabel else "multiclass"
+    )
+    summary["evaluation_protocol"] = {
+        "adapter": "mlp",
+        "cv_type": "nested",
+        "outer_folds": int(n_splits),
+        "inner_folds": inner_folds_by_fold,
+        "random_state": int(random_state),
+        "tuning_metric": scoring_auc,
+        "n_trials": int(n_trials)
     }
 
-    cv_res = cross_validate(final_pipe, X, y, cv = cv, scoring = scorers, n_jobs = -1, return_train_score = False)
-
-    # Aggregate results (JSON compatible)
-    summary = {
-        "accuracy": [float(cv_res["test_accuracy"].mean()), float(cv_res["test_accuracy"].std())],
-        "f1_weighted": [float(cv_res["test_f1_weighted"].mean()), float(cv_res["test_f1_weighted"].std())],
-        "precision_weighted": [float(cv_res["test_precision_weighted"].mean()), float(cv_res["test_precision_weighted"].std())],
-        "roc_auc": [float(cv_res["test_roc_auc"].mean()), float(cv_res["test_roc_auc"].std())],
-        "classes": classes,
-        "best_params": study.best_params
-    }
-
-    print(f"CV {n_splits}-fold results (mean ± std):")
+    print(f"Nested CV {n_splits}-fold results (mean ± std):")
     for k in ["accuracy", "f1_weighted", "precision_weighted", "roc_auc"]:
         m, s = summary[k]
         print(f"  {k:18s}: {m:.4f} ± {s:.4f}")
@@ -283,89 +406,108 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
                                                 image_paths, id_col, label_col)
 
-    def auc_scorer(est, X, y):
-        """
-        Function to handle appropriate AUC scoring based on dataset type (multilabel vs multiclass). 
-
-        Args:
-            est : A KNeighborsClassifier object
-            X : The embeddings computed by the model
-            y : The target diagnosis(es)
-        
-        Returns:
-            The appropriate AUC scorer
-        """
-        proba = est.predict_proba(X)
-        
-        if is_multilabel:
-            # len(proba) == num of classes = L; p is an array of (N x 2), N == num of samples
-            # np.transpose flips a list of (N x 1) arrays into a (N x L) array
-            proba_stacked = np.transpose([p[:, 1] for p in proba])
-            return roc_auc_score(y, proba_stacked, average = "macro")
-        else:
-            # Multiclass/Binary
-            if proba.shape[1] == 2:
-                return roc_auc_score(y, proba[:, 1])
-            else:
-                return roc_auc_score(y, proba, multi_class = "ovr", average = "macro")
-    
-    def objective(trial):
-        """
-        Function used by Optuna to maximize KNN performance.
-        """
-        k = trial.suggest_int("n_neighbors", 1, 30)
-        weights = trial.suggest_categorical("weights", ["uniform", "distance"])
-        metric = trial.suggest_categorical("metric", ["euclidean", "cosine", "manhattan"])
-        
-        clf = KNeighborsClassifier(n_neighbors = k, weights = weights, metric = metric)
+    def build_pipe(params):
+        clf = KNeighborsClassifier(
+            n_neighbors = params["n_neighbors"],
+            weights = params["weights"],
+            metric = params["metric"]
+        )
         pipe = Pipeline([("norm", Normalizer(norm = "l2")), ("knn", clf)])
-        
-        # Use F1 weighted for tuning KNN (handling class imbalance better than accuracy)
-        score = cross_val_score(pipe, X, y, cv = 3, scoring = "f1_weighted", n_jobs = -1).mean()
-        return score
+
+        return pipe
 
     print(f"--- Optimizing KNN with Optuna ({n_trials} trials) ---")
-    study = optuna.create_study(direction = "maximize")
-    study.optimize(objective, n_trials = n_trials)
+    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    fold_score_rows = []
+    best_params_by_fold = []
+    inner_folds_by_fold = []
+    y_true_parts = []
+    y_pred_parts = []
 
-    # Final Evaluation with Best Params
-    best_clf = KNeighborsClassifier(
-        n_neighbors = study.best_params["n_neighbors"],
-        weights = study.best_params["weights"],
-        metric = study.best_params["metric"]
-    )
-    
-    final_pipe = Pipeline([("norm", Normalizer(norm="l2")), ("knn", best_clf)])
+    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
+        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
 
-    if is_multilabel:
-        cv = KFold(n_splits = 5, shuffle = True, random_state = random_state)
-    else:
-        cv = StratifiedKFold(n_splits = 5, shuffle = True, random_state = random_state)
+        def objective(trial):
+            """
+            Function used by Optuna to maximize KNN performance.
+            """
+            params = {
+                "n_neighbors": trial.suggest_int("n_neighbors", 1, 30),
+                "weights": trial.suggest_categorical("weights", ["uniform", "distance"]),
+                "metric": trial.suggest_categorical("metric", ["euclidean", "cosine", "manhattan"])
+            }
 
-    scorers = {
-        "accuracy": "accuracy",
-        "f1_weighted": make_scorer(f1_score, average = "weighted", zero_division = 0),
-        "precision_weighted": make_scorer(precision_score, average = "weighted", zero_division = 0),
-        "roc_auc": auc_scorer
-    }
+            # Use F1 weighted for tuning KNN (handling class imbalance better than accuracy)
+            score = cross_val_score(
+                build_pipe(params), X_train, y_train,
+                cv = inner_cv,
+                scoring = "f1_weighted",
+                n_jobs = -1
+            ).mean()
+            return score
 
-    res = cross_validate(final_pipe, X, y, cv = cv, scoring = scorers, n_jobs = -1, return_train_score = False)
+        study = optuna.create_study(direction = "maximize")
+        study.optimize(objective, n_trials = n_trials)
+        best_params_by_fold.append(study.best_params)
+
+        final_pipe = build_pipe(study.best_params)
+        final_pipe.fit(X_train, y_train)
+        y_pred = final_pipe.predict(X_test)
+        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+
+        for metric, score in scores.items():
+            fold_scores[metric].append(float(score))
+
+        fold_score_rows.append(_fold_summary(fold_idx, scores))
+        y_true_parts.append(y_test)
+        y_pred_parts.append(y_pred)
+
+        print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
+
+    score_summary = _summarize_fold_scores(fold_scores)
+    best_params = _most_common_params(best_params_by_fold)
 
     # JSON compatible
     summary = {
-        "best_k": study.best_params["n_neighbors"],
+        "best_k": best_params["n_neighbors"],
         "best_scores": {
-            "accuracy": float(res["test_accuracy"].mean()),
-            "f1_weighted": float(res["test_f1_weighted"].mean()),
-            "precision_weighted": [float(np.mean(res["test_precision_weighted"])),
-                                   float(np.std(res["test_precision_weighted"]))],
-            "roc_auc": [float(res["test_roc_auc"].mean()), float(res["test_roc_auc"].std())]
+            "accuracy": score_summary["accuracy"][0],
+            "f1_weighted": score_summary["f1_weighted"][0],
+            "precision_weighted": score_summary["precision_weighted"],
+            "roc_auc": score_summary["roc_auc"]
         },
         "classes": classes,
-        "best_params": study.best_params
+        "best_params": best_params,
+        "best_params_by_fold": best_params_by_fold,
+        "fold_scores": fold_score_rows,
+        "per_class": _per_class_metrics(
+            np.concatenate(y_true_parts),
+            np.concatenate(y_pred_parts),
+            classes,
+            is_multilabel
+        ),
+        "dataset_info": _dataset_info(
+            dataset_name,
+            y,
+            classes,
+            "multilabel" if is_multilabel else "multiclass"
+        ),
+        "evaluation_protocol": {
+            "adapter": "knn",
+            "cv_type": "nested",
+            "outer_folds": int(n_splits),
+            "inner_folds": inner_folds_by_fold,
+            "random_state": int(random_state),
+            "tuning_metric": "f1_weighted",
+            "n_trials": int(n_trials)
+        }
     }
 
-    print(f"KNN CV (n_splits={n_splits}) — best k = {summary['best_k']}")
+    print(f"KNN nested CV (n_splits={n_splits}) — most common best k = {summary['best_k']}")
     for k, v in summary["best_scores"].items():
         if isinstance(v, list):
             continue
@@ -396,72 +538,107 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
                                                 image_paths, id_col, label_col)
 
-    if is_multilabel:
-        cv = KFold(n_splits = n_splits, shuffle = True, random_state = random_state)
-        scoring_auc = "roc_auc" # sklearn handles macro average
-    else:
-        cv = StratifiedKFold(n_splits = n_splits, shuffle = True, random_state = random_state)
-        scoring_auc = "roc_auc" if len(classes) == 2 else "roc_auc_ovr"
+    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
 
     print(f"--- Optimizing Logistic Regression with Optuna ({n_trials} trials) ---")
 
-    def objective(trial):
-        """
-        Function used by Optuna to maximize LR performance.
-        """
-        c_value = trial.suggest_float("C", 1e-3, 10, log = True)
-
-        # FIXME: Edit as necessary
-        if len(X) > 20000:
+    def build_pipe(params, n_rows, max_iter):
+        if n_rows > 20000:
             solver = "saga"
         else:
             solver = "lbfgs"
-        
-        base_clf = LogisticRegression(C = c_value, max_iter = 2000, class_weight = "balanced", solver = solver)
-        
+
+        base_clf = LogisticRegression(
+            C = params["C"],
+            max_iter = max_iter,
+            class_weight = "balanced",
+            solver = solver
+        )
+
         if is_multilabel:
             clf = MultiOutputClassifier(base_clf)
         else:
             clf = base_clf
-            
-        pipe = Pipeline([("std", StandardScaler()), ("clf", clf)])
-        
-        # Use 3-fold for speed during tuning
-        return cross_val_score(pipe, X, y, cv = 3, scoring = scoring_auc, n_jobs = -1).mean()
-    
-    study = optuna.create_study(direction = "maximize")
-    study.optimize(objective, n_trials = n_trials)
 
-    # Final Model
-    final_base = LogisticRegression(C=study.best_params["C"], max_iter = 3000, class_weight = "balanced")
-    if is_multilabel:
-        final_clf = MultiOutputClassifier(final_base)
-    else:
-        final_clf = final_base
+        return Pipeline([("std", StandardScaler()), ("clf", clf)])
 
-    final_pipe = Pipeline([("std", StandardScaler()), ("clf", final_clf)])
-    
-    scorers = {
-        "accuracy": "accuracy",
-        "f1_weighted": "f1_weighted",
-        "precision_weighted": "precision_weighted",
-        "roc_auc": scoring_auc,
-    }
+    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    fold_score_rows = []
+    best_params_by_fold = []
+    inner_folds_by_fold = []
+    y_true_parts = []
+    y_pred_parts = []
 
-    res = cross_validate(final_pipe, X, y, cv = cv, scoring = scorers, n_jobs = -1, return_train_score = False)
+    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
+        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
 
-    # Summarize results (JSON compatible)
-    summary = {
-        "accuracy": [float(res["test_accuracy"].mean()), float(res["test_accuracy"].std())],
-        "f1_weighted": [float(res["test_f1_weighted"].mean()), float(res["test_f1_weighted"].std())],
-        "precision_weighted": [float(res["test_precision_weighted"].mean()), float(res["test_precision_weighted"].std())],
-        "roc_auc": [float(res["test_roc_auc"].mean()), float(res["test_roc_auc"].std())],
-        "classes": classes,
-        "best_params": study.best_params 
+        def objective(trial):
+            """
+            Function used by Optuna to maximize LR performance.
+            """
+            params = {"C": trial.suggest_float("C", 1e-3, 10, log = True)}
+
+            # Use 3-fold inner CV for tuning without touching the outer test fold.
+            return cross_val_score(
+                build_pipe(params, len(X_train), max_iter = 2000),
+                X_train,
+                y_train,
+                cv = inner_cv,
+                scoring = scoring_auc,
+                n_jobs = -1
+            ).mean()
+
+        study = optuna.create_study(direction = "maximize")
+        study.optimize(objective, n_trials = n_trials)
+        best_params_by_fold.append(study.best_params)
+
+        final_pipe = build_pipe(study.best_params, len(X_train), max_iter = 3000)
+        final_pipe.fit(X_train, y_train)
+        y_pred = final_pipe.predict(X_test)
+        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+
+        for metric, score in scores.items():
+            fold_scores[metric].append(float(score))
+
+        fold_score_rows.append(_fold_summary(fold_idx, scores))
+        y_true_parts.append(y_test)
+        y_pred_parts.append(y_pred)
+
+        print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
+
+    summary = _summarize_fold_scores(fold_scores)
+    summary["classes"] = classes
+    summary["best_params"] = _most_common_params(best_params_by_fold)
+    summary["best_params_by_fold"] = best_params_by_fold
+    summary["fold_scores"] = fold_score_rows
+    summary["per_class"] = _per_class_metrics(
+        np.concatenate(y_true_parts),
+        np.concatenate(y_pred_parts),
+        classes,
+        is_multilabel
+    )
+    summary["dataset_info"] = _dataset_info(
+        dataset_name,
+        y,
+        classes,
+        "multilabel" if is_multilabel else "multiclass"
+    )
+    summary["evaluation_protocol"] = {
+        "adapter": "logistic_regression",
+        "cv_type": "nested",
+        "outer_folds": int(n_splits),
+        "inner_folds": inner_folds_by_fold,
+        "random_state": int(random_state),
+        "tuning_metric": scoring_auc,
+        "n_trials": int(n_trials)
     }
 
     # Print out the results
-    print(f"Logistic Regression CV Results (n_splits={n_splits}):")
+    print(f"Logistic Regression Nested CV Results (n_splits={n_splits}):")
     for metric in ["accuracy", "f1_weighted", "precision_weighted", "roc_auc"]:
         mean, std = summary[metric]
         print(f"  {metric:18s}: {mean:.4f} ± {std:.4f}")
@@ -469,7 +646,8 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     return summary
 
 def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-                   ks = (1, 5, 10), normalize = True, per_class = False):
+                   ks = (1, 5, 10), normalize = True, per_class = False,
+                   bootstrap = True, n_bootstrap = 1000, ci = 95, random_state = 42):
     """
     All-vs-all retrieval on embeddings using cosine similarity (via L2-normalization).
     Returns Recall@K and mAP. Queries from singleton classes are skipped for metrics.
@@ -487,6 +665,10 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         ks : Iterable of ints, K values for Recall@K
         normalize : Boolean flag to L2-normalize embeddings
         per_class : Boolean flag to return per-class Recall@K
+        bootstrap : Boolean flag to return bootstrap confidence intervals
+        n_bootstrap : Number of bootstrap resamples over evaluated queries
+        ci : Confidence interval width
+        random_state : Seed used for bootstrap resampling
 
     Returns:
         results : JSON-compatible summary of the recall test
@@ -523,6 +705,19 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "n_eval": 0,
             "recall_at_k": {int(k): np.nan for k in ks},
             "map": np.nan,
+            "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
+            "evaluation_protocol": {
+                "type": "all_vs_all_retrieval",
+                "ks": [int(k) for k in ks],
+                "similarity": "cosine",
+                "normalized": normalize,
+                "bootstrap": bootstrap,
+                "n_bootstrap": int(n_bootstrap),
+                "ci": int(ci),
+                "random_state": int(random_state),
+                "tuned": False
+            },
+            "protocol": {"similarity": "cosine", "normalized": normalize, "tuned": False},
             "note": "No classes have more than one sample; retrieval undefined."
         }
 
@@ -564,13 +759,22 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         # AP = mean of precisions at relevant ranks
         return float(np.mean(precisions))
 
-    # Compute Recall@K and mAP
-    recall_at_k = {}
-    for K in ks:
-        vals = [recall_at_k_for_query(i, K) for i in idx_valid]
-        recall_at_k[int(K)] = float(np.mean(vals))
+    # Compute query-level metrics, then aggregate.
+    per_query = []
+    for i in idx_valid:
+        recall_values = {int(K): bool(recall_at_k_for_query(i, K)) for K in ks}
+        per_query.append({
+            "query_index": int(i),
+            "class": str(classes[y[i]]),
+            "average_precision": average_precision_for_query(i),
+            "recall_at_k": recall_values
+        })
 
-    aps = [average_precision_for_query(i) for i in idx_valid]
+    recall_at_k = {
+        int(K): float(np.mean([q["recall_at_k"][int(K)] for q in per_query]))
+        for K in ks
+    }
+    aps = np.array([q["average_precision"] for q in per_query], dtype = float)
     mAP = float(np.nanmean(aps)) if len(aps) else np.nan
 
     # JSON compatible
@@ -579,8 +783,49 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         "n_eval": n_eval,
         "recall_at_k": recall_at_k,
         "map": mAP,
-        "classes": classes
+        "classes": classes,
+        "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
+        "evaluation_protocol": {
+            "type": "all_vs_all_retrieval",
+            "ks": [int(k) for k in ks],
+            "similarity": "cosine",
+            "normalized": normalize,
+            "bootstrap": bootstrap,
+            "n_bootstrap": int(n_bootstrap),
+            "ci": int(ci),
+            "random_state": int(random_state),
+            "tuned": False
+        },
+        "protocol": {"similarity": "cosine", "normalized": normalize, "tuned": False},
+        "per_query": per_query
     }
+
+    if bootstrap:
+        rng = np.random.default_rng(random_state)
+        alpha = (100 - ci) / 2
+        boot_recall = {int(K): [] for K in ks}
+        boot_map = []
+
+        for _ in range(n_bootstrap):
+            sample_idx = rng.integers(0, len(per_query), size = len(per_query))
+            sample = [per_query[i] for i in sample_idx]
+            for K in ks:
+                boot_recall[int(K)].append(np.mean([q["recall_at_k"][int(K)] for q in sample]))
+            boot_map.append(np.nanmean([q["average_precision"] for q in sample]))
+
+        results["confidence_intervals"] = {
+            "recall_at_k": {
+                int(K): [
+                    float(np.nanpercentile(boot_recall[int(K)], alpha)),
+                    float(np.nanpercentile(boot_recall[int(K)], 100 - alpha))
+                ]
+                for K in ks
+            },
+            "map": [
+                float(np.nanpercentile(boot_map, alpha)),
+                float(np.nanpercentile(boot_map, 100 - alpha))
+            ]
+        }
 
     # Optional per-class Recall@K
     if per_class:
@@ -624,22 +869,24 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
     Returns:
         results_dict : JSON-compatible summary of the clustering test
     """
-    # classes is unused by design
     X, y, classes = prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths,
             id_col, label_col)
-    
-    print(f"--- Clustering evaluation with k_min={min(k_range)} through k_max={max(k_range)} ---")
+
+    class_count_k = len(classes)
+    eval_k_values = sorted(set(k_range) | {class_count_k})
+
+    print(f"--- Clustering evaluation with k_min={min(eval_k_values)} through k_max={max(eval_k_values)} ---")
 
     # Run KMeans for each k
     results = []
-    for k in k_range:
+    for k in eval_k_values:
         kmeans = KMeans(n_clusters = k, n_init = "auto", random_state = random_state)
         cluster_labels = kmeans.fit_predict(X)
 
         ari = adjusted_rand_score(y, cluster_labels)
         nmi = normalized_mutual_info_score(y, cluster_labels)
 
-        if compute_silhouette and len(np.unique(cluster_labels)) > 1:
+        if compute_silhouette and 1 < len(np.unique(cluster_labels)) < X.shape[0]:
             sil = silhouette_score(X, cluster_labels)
         else:
             sil = np.nan
@@ -648,26 +895,54 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
 
     results_df = pd.DataFrame(results)
 
+    def row_summary(row):
+        return {
+            "k": int(row["k"]),
+            "ARI": float(row["ARI"]),
+            "NMI": float(row["NMI"]),
+            "Silhouette": float(row["Silhouette"])
+        }
+
     # Display summary
     best_k_ari = results_df.loc[results_df["ARI"].idxmax()]
     best_k_nmi = results_df.loc[results_df["NMI"].idxmax()]
     best_k_sil = results_df.loc[results_df["Silhouette"].idxmax()] if compute_silhouette else None
+    class_count_row = results_df.loc[results_df["k"] == class_count_k].iloc[0]
 
     print("KMeans Clustering Evaluation (variable k):")
     print(results_df.round(4))
     print()
     print(f"Best ARI:  k={int(best_k_ari['k'])}, score={best_k_ari['ARI']:.4f}")
     print(f"Best NMI:  k={int(best_k_nmi['k'])}, score={best_k_nmi['NMI']:.4f}")
+    print(f"Class-count k: k={class_count_k}, NMI={class_count_row['NMI']:.4f}")
     if compute_silhouette:
         print(f"Best Silhouette: k = {int(best_k_sil['k'])}, score = {best_k_sil['Silhouette']:.4f}")
 
     # JSON compatible
     results_dict = {
-        "best_ari": [int(best_k_ari['k']), best_k_ari['ARI']],
-        "best_nmi": [int(best_k_nmi['k']), best_k_nmi['NMI']]
+        "best_ari": [int(best_k_ari['k']), float(best_k_ari['ARI'])],
+        "best_nmi": [int(best_k_nmi['k']), float(best_k_nmi['NMI'])],
+        "oracle_best_ari": row_summary(best_k_ari),
+        "oracle_best_nmi": row_summary(best_k_nmi),
+        "class_count_k": row_summary(class_count_row),
+        "k_sweep": [row_summary(row) for _, row in results_df.iterrows()],
+        "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
+        "evaluation_protocol": {
+            "algorithm": "kmeans",
+            "k_range": [int(k) for k in eval_k_values],
+            "primary_k_rule": "number_of_classes",
+            "random_state": int(random_state),
+            "compute_silhouette": compute_silhouette,
+            "label_tuned_primary": False
+        }
     }
 
     if compute_silhouette:
-        results_dict["best_silhouette"] = [int(best_k_sil['k']), best_k_sil['Silhouette']]
+        results_dict["best_silhouette"] = [int(best_k_sil['k']), float(best_k_sil['Silhouette'])]
+        results_dict["silhouette_selected_k"] = row_summary(best_k_sil)
+
+    if dataset_name == "chexpert":
+        results_dict["note"] = ("For CheXpert, clustering classes are unique multilabel "
+                                "combinations and should be interpreted as exploratory.")
 
     return results_dict
