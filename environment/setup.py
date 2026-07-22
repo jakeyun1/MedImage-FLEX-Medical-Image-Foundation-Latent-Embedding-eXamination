@@ -6,6 +6,7 @@ Downloads the datasets and the testbench dependencies.
 
 import os
 import sys
+import subprocess
 
 # Make the current directory (for the subprocess) relative to the testbench program
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -13,8 +14,12 @@ os.chdir(script_dir)
 
 python = sys.executable
 
-# Download the dependencies
-os.system(f"{python} -m pip install -r .{os.sep}dependencies.txt")
+# Download testbench dependencies
+subprocess.run([python, "-m", "pip", "install", "-r", f".{os.sep}dependencies.txt"], check = True)
+
+# Download deep learning frameworks
+subprocess.run([python, "-m", "pip", "install", "--index-url", "https://download.pytorch.org/whl/cpu", "torch", "torchvision"], check = True)
+subprocess.run([python, "-m", "pip", "install", "tensorflow-cpu"], check = True)
 
 # Import after downloading dependencies
 import kagglehub

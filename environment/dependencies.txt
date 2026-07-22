@@ -1,14 +1,10 @@
 pandas
 numpy
-torch==2.5.1
-torchvision
 transformers
 sentencepiece
 protobuf
 pillow
 scikit-learn
 kagglehub
-tensorflow
-huggingface
 tqdm
 optuna
