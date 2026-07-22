@@ -7,12 +7,11 @@ This file contains the functions for loading the datasets.
 import os
 import pandas as pd
 import kagglehub
-from torch import nn as nn
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 
 # Map to link datasets to their respective paths and their respective CSV data
-# FIXME: If running on an HPC cluster, change dataset paths as needed  
+# FIXME: Change dataset paths as needed
 DATASET_MAP = {
     "pad_ufes": {"dataset_path": kagglehub.dataset_download("mahdavi1202/skin-cancer"),
             "CSV_NAMES": ["metadata.csv"]},
@@ -45,8 +44,21 @@ class GeneralDataset(Dataset):
             image = self.transform(image)
         return image, image_path
 
+# Custom function for batch loading
+def custom_collate_function(batch):
+        """
+        Prepares a batch for embedding extraction.
+
+        Args:
+            batch : A batch of images and image paths from the DataLoader
+        
+        Returns:
+            A Python list of a tuple of images and a tuple of image paths
+        """
+        return list(zip(*batch))
+
 # Function to effectively load datasets based on their structure
-def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = False):
+def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = False, num_workers = 0):
     """
     Loads the desired dataset for use in embedding extraction.
 
@@ -113,8 +125,20 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         # Full image paths are filtered for those desired
         image_paths = [x for x in image_paths if os.sep.join((x.split(os.sep))[-2:]) in images_present]
 
+        def transform_path(path):
+            """
+            Transforms a dataset path to match an expected, local path.
+
+            Args:
+                path : A path from the CBIS-DDSM dataset
+
+            Returns:
+                A localized path used for image identification
+            """
+            return os.sep.join(path.split("/")[-2:])
+        
         # Unique identifier is stored
-        metadata_df["image file path"] = metadata_df["image file path"].apply(lambda x : os.sep.join(x.split("/")[-2:]))
+        metadata_df["image file path"] = metadata_df["image file path"].apply(transform_path)
     
     elif dataset_name == "ham10000":
         for dirpath, dirnames, filenames in os.walk(dataset_path):
@@ -207,9 +231,8 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
 
     general_dataset = GeneralDataset(metadata_df, image_paths, transform)
 
-    # FIXME: Edit num_workers as needed
     dataloader = DataLoader(general_dataset, batch_size, shuffle, \
-            collate_fn = lambda batch : list(zip(*batch)), num_workers = 2)
+            collate_fn = custom_collate_function, num_workers = num_workers)
     dataloader.dataset_name = dataset_name
     
     return dataloader, metadata_df

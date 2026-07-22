@@ -70,11 +70,18 @@ def main():
     """
     Runs the testbench application.
     """
-    parser = argparse.ArgumentParser(description = "Run medical FM embedding benchmark.")
-    parser.add_argument("--config", required = True, help = "Path to benchmark config JSON file.")
+    parser = argparse.ArgumentParser(description = "Run medical FM embedding benchmark")
+    parser.add_argument("--config", required = True, help = "Path to benchmark config JSON file")
+    parser.add_argument("--num-workers", default = 0, help = "Number of DataLoader workers, default is 0")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except FileNotFoundError:
+        print("Please use absolute paths for config files.")
+        raise
+
+    num_workers = int(args.num_workers)
 
     model_id = cfg["model_id"]
     model_name = clean_name(model_id, "-")
@@ -96,6 +103,13 @@ def main():
 
     write_json(cfg, os.path.join(run_folder, "config_used.json"))
 
+    # Prepare for multiprocessing if requested
+    if num_workers >= 1:
+        import torch.multiprocessing as mp
+        mp.set_start_method(method = "spawn", force = True)
+    else:
+        num_workers = max(0, num_workers)
+
     # Load dependecies once JSON file is parsed
     from scripts.dataloading import load_dataset
     from scripts.models import build_backend
@@ -116,8 +130,7 @@ def main():
         # Build backend
         backend = build_backend(model_id)
 
-        # Load dataset with the backend transform (Torchvision models)
-        # HF backend returns None here; dataset will return PIL images (still works)
+        # Load dataset and corresponding backend transform
         transform = backend.get_transform()
 
         load_start = perf_counter()
@@ -125,7 +138,8 @@ def main():
             dataset_name,
             transform = transform,
             batch_size = batch_size,
-            shuffle = shuffle
+            shuffle = shuffle,
+            num_workers = num_workers
         )
         dataset_loading_seconds = perf_counter() - load_start
 

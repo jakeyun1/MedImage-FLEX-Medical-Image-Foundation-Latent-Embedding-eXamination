@@ -16,6 +16,20 @@ class EmbeddingBackend(ABC):
         self.model_id = model_id
         self.device = device
 
+    def transform_function(self, image):
+        """
+        NOTE: OPTIONAL, must be implemented by a user
+
+        Used to implement custom image transformations.
+
+        Args:
+            image : A raw medical image (e.g. PIL, NumPy, Tensor, etc.)
+
+        Returns:
+            A transformed image
+        """
+        return None
+
     @abstractmethod
     def get_transform(self):
         """
@@ -91,6 +105,8 @@ class TorchvisionBackend(EmbeddingBackend):
 class HuggingFaceVisionBackend(EmbeddingBackend):
     def __init__(self, model_id, device, target_size = [448, 448], output_key = None):
         super().__init__(model_id, device)
+
+        # --- General models ---
         self.target_size = tuple(target_size)
         self.model = AutoModel.from_pretrained(model_id, trust_remote_code = True).to(device).eval()
         
@@ -109,12 +125,13 @@ class HuggingFaceVisionBackend(EmbeddingBackend):
     def get_transform(self):
         # Usually we bypass torch transforms and let the processor handle everything
         return None
-
+        
     @torch.no_grad()
     def encode_batch(self, images):
         """
         Computes the embeddings for a batch of images.
         """
+        # --- General models ---
         if isinstance(images, tuple):
             images = list(images)
 
