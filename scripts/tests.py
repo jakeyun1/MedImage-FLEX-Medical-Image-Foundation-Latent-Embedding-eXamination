@@ -145,6 +145,7 @@ def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, 
 
 ### Adapter test functions ###
 
+
 def _cv_splitter(is_multilabel, n_splits, random_state):
     if is_multilabel:
         return KFold(n_splits = n_splits, shuffle = True, random_state = random_state)
@@ -188,12 +189,6 @@ def _dataset_info(dataset_name, y, classes, label_type):
         "class_counts": {str(cls): int(counts[idx]) for idx, cls in enumerate(classes)},
         "label_type": label_type
     }
-
-def _multiclass_probe_label_type(dataset_name):
-    if dataset_name == "chexpert":
-        return "multilabel_combinations"
-
-    return "multiclass"
 
 def _per_class_metrics(y_true, y_pred, classes, is_multilabel):
     labels = None if is_multilabel else np.arange(len(classes))
@@ -361,12 +356,6 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         classes,
         is_multilabel
     )
-    summary["dataset_info"] = _dataset_info(
-        dataset_name,
-        y,
-        classes,
-        "multilabel" if is_multilabel else "multiclass"
-    )
     summary["evaluation_protocol"] = {
         "adapter": "mlp",
         "cv_type": "nested",
@@ -377,12 +366,19 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         "n_trials": int(n_trials)
     }
 
+    dataset_info = _dataset_info(
+            dataset_name,
+            y,
+            classes,
+            "multilabel" if is_multilabel else "multiclass"
+    )
+
     print(f"Nested CV {n_splits}-fold results (mean ± std):")
     for k in ["accuracy", "f1_weighted", "precision_weighted", "roc_auc"]:
         m, s = summary[k]
         print(f"  {k:18s}: {m:.4f} ± {s:.4f}")
 
-    return summary
+    return summary, dataset_info
 
 def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
            n_splits = 5, random_state = 42, n_trials = 15):
@@ -489,12 +485,6 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
             np.concatenate(y_pred_parts),
             classes,
             is_multilabel
-        ),
-        "dataset_info": _dataset_info(
-            dataset_name,
-            y,
-            classes,
-            "multilabel" if is_multilabel else "multiclass"
         ),
         "evaluation_protocol": {
             "adapter": "knn",
@@ -621,12 +611,6 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         classes,
         is_multilabel
     )
-    summary["dataset_info"] = _dataset_info(
-        dataset_name,
-        y,
-        classes,
-        "multilabel" if is_multilabel else "multiclass"
-    )
     summary["evaluation_protocol"] = {
         "adapter": "logistic_regression",
         "cv_type": "nested",
@@ -705,7 +689,6 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "n_eval": 0,
             "recall_at_k": {int(k): np.nan for k in ks},
             "map": np.nan,
-            "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
             "evaluation_protocol": {
                 "type": "all_vs_all_retrieval",
                 "ks": [int(k) for k in ks],
@@ -784,7 +767,6 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         "recall_at_k": recall_at_k,
         "map": mAP,
         "classes": classes,
-        "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
         "evaluation_protocol": {
             "type": "all_vs_all_retrieval",
             "ks": [int(k) for k in ks],
@@ -796,8 +778,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "random_state": int(random_state),
             "tuned": False
         },
-        "protocol": {"similarity": "cosine", "normalized": normalize, "tuned": False},
-        "per_query": per_query
+        "protocol": {"similarity": "cosine", "normalized": normalize, "tuned": False}
     }
 
     if bootstrap:
@@ -926,7 +907,6 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         "oracle_best_nmi": row_summary(best_k_nmi),
         "class_count_k": row_summary(class_count_row),
         "k_sweep": [row_summary(row) for _, row in results_df.iterrows()],
-        "dataset_info": _dataset_info(dataset_name, y, classes, _multiclass_probe_label_type(dataset_name)),
         "evaluation_protocol": {
             "algorithm": "kmeans",
             "k_range": [int(k) for k in eval_k_values],

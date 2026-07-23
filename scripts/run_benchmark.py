@@ -28,11 +28,13 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         results : A map containing the formatted results (JSON-ready) for each adapter
     """
     # MLP
-    mlp_summary, mlp_seconds = timed_call(
+    mlp_tuple, mlp_seconds = timed_call(
         MLP_cv, dataset_name, embeddings, metadata_df,
         image_paths, id_col = id_col, label_col = label_col, n_splits = 5
     )
     print(f"Completed MLP CV benchmark on {dataset_name}.\n")
+
+    mlp_summary, dataset_info = mlp_tuple
 
     # KNN
     knn_summary, knn_seconds = timed_call(
@@ -67,6 +69,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
 
     # Compile the results
     results = {
+        "dataset_info": dataset_info,
         "mlp_cv": mlp_summary,
         "knn_cv": knn_summary,
         "logreg_cv": logreg_summary,
