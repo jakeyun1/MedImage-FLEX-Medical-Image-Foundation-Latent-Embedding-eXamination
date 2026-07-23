@@ -22,7 +22,7 @@ DATASET_COL_MAP = {"pad_ufes": ("img_id", "diagnostic"), "cbis_ddsm": ("image fi
 ID_COL_IDX = 0
 LABEL_COL_IDX = 1
 
-# Make the current directory (for the subprocess) relative to the testbench
+# Make the working directory relative to the testbench
 script_dir = os.path.dirname(os.path.abspath(__file__))
 os.chdir(script_dir)
 
@@ -68,10 +68,10 @@ def write_json(content, output_path: str):
 
 def main():
     """
-    Runs the testbench application.
+    Runs MedImage-FLEX
     """
-    parser = argparse.ArgumentParser(description = "Run medical FM embedding benchmark")
-    parser.add_argument("--config", required = True, help = "Path to benchmark config JSON file")
+    parser = argparse.ArgumentParser(description = "Run MedImage-FLEX — a medical FM embedding testbench")
+    parser.add_argument("--config", required = True, help = "Path to config JSON file")
     parser.add_argument("--num-workers", default = 0, help = "Number of DataLoader workers, default is 0")
     args = parser.parse_args()
 
@@ -154,12 +154,11 @@ def main():
 
         # Extract embeddings
         embedding_start = perf_counter()
-        embeddings, image_paths, embedding_metadata = extract_embeddings(
+        embeddings, image_paths, source = extract_embeddings(
             dataloader,
             backend,
             normalize = normalize_embeddings,
-            cache = cache_embeddings,
-            return_metadata = True
+            cache = cache_embeddings
         )
         embedding_seconds = perf_counter() - embedding_start
 
@@ -172,25 +171,19 @@ def main():
             id_col = id_col,
             label_col = label_col
         )
+
         emb_array = np.asarray(embeddings)
         results["embedding_info"] = {
             "model_id": model_id,
-            "embedding_dim": int(emb_array.shape[1]) if emb_array.ndim > 1 else 1,
+            "embedding_dim": int(emb_array.shape[1]),
             "normalized": normalize_embeddings,
             "n_embeddings": int(emb_array.shape[0]),
-            "source": embedding_metadata["source"]
+            "source": source
         }
-        results["runtime"]["includes"] = {
-            "dataset_loading": True,
-            "embedding_extraction": True,
-            "benchmark_tests": True,
-            "json_writing": False,
-            "dataset_download": False,
-            "environment_setup": False
-        }
-        results["runtime"]["stages"]["dataset_loading"] = float(dataset_loading_seconds)
-        results["runtime"]["stages"]["embedding_extraction"] = float(embedding_seconds)
-        results["runtime"]["stages"]["total_dataset_run"] = float(perf_counter() - dataset_start)
+        
+        results["runtime"]["stages"]["dataset_loading"] = dataset_loading_seconds
+        results["runtime"]["stages"]["embedding_extraction"] = embedding_seconds
+        results["runtime"]["stages"]["total_dataset_run"] = perf_counter() - dataset_start
 
         # Save results
         results_path = os.path.join(run_folder, f"{dataset_name}.json")
