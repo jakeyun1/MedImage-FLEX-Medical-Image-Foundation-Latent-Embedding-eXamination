@@ -47,14 +47,19 @@ def extract_embeddings(dataloader, backend, normalize = True, cache = False):
         return filename
 
     # Prepare filename and clean it to prevent path issues
-    filename = backend.model_id + "+" + dataloader.dataset_name
+    normalization = "normalized" if normalize else "raw"
+    protocol_name = getattr(dataloader, "protocol_name", dataloader.dataset_name)
+    filename = backend.model_id + "+" + protocol_name + "+" + normalization
     filename = clean_filename(filename, "-").replace(".", "")
-    filepath = f".{os.sep}embeddings{os.sep}{filename}.npy"
+    filepath = f".{os.sep}embeddings{os.sep}{filename}.npz"
 
-    if os.path.exists(filepath):
+    if cache and os.path.exists(filepath):
         print(f"Embeddings file detected! Loading \'{os.path.abspath(filepath)}\'")
-        all_embs = np.load(filepath)
-        all_paths = dataloader.dataset.image_paths
+        with np.load(filepath) as cached:
+            all_embs = cached["embeddings"]
+            all_paths = cached["image_paths"].tolist()
+        if len(all_embs) != len(all_paths):
+            raise ValueError("Cached embedding and image-path counts do not match.")
         source = "cache"
 
         return all_embs, all_paths, source
@@ -77,7 +82,7 @@ def extract_embeddings(dataloader, backend, normalize = True, cache = False):
         
         # Prevents overwriting embedding files
         if not os.path.exists(filepath):
-            np.save(filepath, all_embs)
+            np.savez(filepath, embeddings = all_embs, image_paths = np.asarray(all_paths))
             print(f"Embeddings cached to: {os.path.abspath(filepath)}\n")
 
     return all_embs, all_paths, source

@@ -9,6 +9,7 @@ import pandas as pd
 import kagglehub
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
+from scripts.cbis_ddsm import CBIS_PROTOCOL, prepare_cbis_ddsm_crops
 
 # Map to link datasets to their respective paths and their respective CSV data
 # FIXME: Change dataset paths as needed
@@ -88,12 +89,12 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
     metadata_df = pd.DataFrame()
 
     if dataset_name == "cbis_ddsm":
+        mapping_df = None
         for dirpath, dirnames, filenames in os.walk(dataset_path):
             for file in filenames:
                 if file.endswith(".csv") and file in CSV_NAMES:
                     if file == "dicom_info.csv":
                         mapping_df = pd.read_csv(os.path.join(dirpath, file))
-                        uid_to_jpg = list(zip(mapping_df["SeriesInstanceUID"], mapping_df["image_path"]))
                     else:
                         csv_paths.append(os.path.join(dirpath, file))
                 elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith("."):
@@ -104,41 +105,18 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         for csv in csv_paths:
             curr_df = pd.read_csv(csv)
             metadata_df = pd.concat([metadata_df, curr_df], ignore_index = True)
-        
-        # Function for translating .dcm paths to .jpg paths
-        def map_if_contains(path):
-                for uid, jpg_path in uid_to_jpg:
-                    if uid in path:
-                        return jpg_path
-                return path # Return original path if no UID-path relation is found
 
-        # Image paths inputed into the GeneralDataset are those from the desired .csv files
-        # Map .dcm to .jpg
-        metadata_df["image file path"] = metadata_df["image file path"].apply(map_if_contains)
-
-        # Desired images are in the metadata_df
-        images_present = metadata_df["image file path"]
-
-        # Set of desired, unique images with their identifier (`SSUID`/`basename`.jpg)
-        images_present = {os.sep.join((x.split("/"))[-2:]) for x in images_present}
-
-        # Full image paths are filtered for those desired
-        image_paths = [x for x in image_paths if os.sep.join((x.split(os.sep))[-2:]) in images_present]
-
-        def transform_path(path):
-            """
-            Transforms a dataset path to match an expected, local path.
-
-            Args:
-                path : A path from the CBIS-DDSM dataset
-
-            Returns:
-                A localized path used for image identification
-            """
-            return os.sep.join(path.split("/")[-2:])
-        
-        # Unique identifier is stored
-        metadata_df["image file path"] = metadata_df["image file path"].apply(transform_path)
+        if mapping_df is None:
+            raise FileNotFoundError("CBIS-DDSM dicom_info.csv was not found.")
+        metadata_df, image_paths, cbis_audit = prepare_cbis_ddsm_crops(
+            metadata_df, mapping_df, image_paths
+        )
+        print(
+            "CBIS-DDSM cropped protocol: "
+            f"{cbis_audit['usable_crops']}/{cbis_audit['input_rows']} usable rows, "
+            f"{cbis_audit['roi_fallback_rows']} recovered via ROI reference, "
+            f"{cbis_audit['excluded_rows']} excluded."
+        )
     
     elif dataset_name == "ham10000":
         for dirpath, dirnames, filenames in os.walk(dataset_path):
@@ -191,12 +169,17 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             return os.sep.join(path.split("/")[-3:])
 
         metadata_df["Path"] = metadata_df["Path"].apply(get_relative_path)
+        metadata_df["patient_id"] = metadata_df["Path"].map(
+            lambda path: path.split(os.sep)[0]
+        )
 
         # Image paths inputed into the GeneralDataset are those from the desired .csv files
         desired_paths = set(metadata_df["Path"])
         image_paths = [path for path in image_paths if os.sep.join(path.split(os.sep)[-3:]) in desired_paths]
         
     elif dataset_name == "odir":
+        LABEL_COLS = ["N", "D", "G", "C", "A", "H", "M", "O"]
+
         for dirpath, dirnames, filenames in os.walk(dataset_path):
             for file in filenames:
                 if file.endswith(".csv") and file in CSV_NAMES:
@@ -210,6 +193,9 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         for csv in csv_paths:
             curr_df = pd.read_csv(csv)
             metadata_df = pd.concat([metadata_df, curr_df], ignore_index = True)
+
+        # Preserve all diagnoses instead of the dataset's single-label target field.
+        metadata_df["target"] = metadata_df[LABEL_COLS].astype(int).values.tolist()
 
         # Image paths inputed into the GeneralDataset are those from the desired .csv files
         images_present = list(metadata_df["filename"])
@@ -234,5 +220,8 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
     dataloader = DataLoader(general_dataset, batch_size, shuffle, \
             collate_fn = custom_collate_function, num_workers = num_workers)
     dataloader.dataset_name = dataset_name
+    dataloader.protocol_name = CBIS_PROTOCOL if dataset_name == "cbis_ddsm" else dataset_name
+    if dataset_name == "cbis_ddsm":
+        dataloader.dataset_audit = cbis_audit
     
     return dataloader, metadata_df

@@ -12,7 +12,9 @@ def timed_call(fn, *args, **kwargs):
     result = fn(*args, **kwargs)
     return result, perf_counter() - start
 
-def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col):
+def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+                  outer_folds = None, n_splits = 5, random_state = 42,
+                  group_col = None):
     """
     Runs the testbench and returns the results for all adapters (for a given model on a given dataset).
 
@@ -30,7 +32,8 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
     # MLP
     mlp_tuple, mlp_seconds = timed_call(
         MLP_cv, dataset_name, embeddings, metadata_df,
-        image_paths, id_col = id_col, label_col = label_col, n_splits = 5
+        image_paths, id_col = id_col, label_col = label_col, n_splits = n_splits,
+        random_state = random_state, outer_folds = outer_folds, group_col = group_col
     )
     print(f"Completed MLP CV benchmark on {dataset_name}.\n")
 
@@ -39,7 +42,8 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
     # KNN
     knn_summary, knn_seconds = timed_call(
         KNN_cv, dataset_name, embeddings, metadata_df, image_paths,
-        id_col = id_col, label_col = label_col, n_splits = 5
+        id_col = id_col, label_col = label_col, n_splits = n_splits,
+        random_state = random_state, outer_folds = outer_folds, group_col = group_col
     )
 
     print(f"Completed KNN CV benchmark on {dataset_name}.\n")
@@ -47,14 +51,16 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
     # LR
     logreg_summary, logreg_seconds = timed_call(
         logistic_regression_cv, dataset_name, embeddings, metadata_df, image_paths,
-        id_col = id_col, label_col = label_col, n_splits = 5
+        id_col = id_col, label_col = label_col, n_splits = n_splits,
+        random_state = random_state, outer_folds = outer_folds, group_col = group_col
     )
     print(f"Completed Logistic Regression CV benchmarks on {dataset_name}.\n")
 
     # Retrieval
     ret_results, retrieval_seconds = timed_call(
         retrieval_eval, dataset_name, embeddings, metadata_df, image_paths,
-        id_col = id_col, label_col = label_col, ks = (1,5,10), per_class=True
+        id_col = id_col, label_col = label_col, ks = (1,5,10), per_class=True,
+        random_state = random_state
     )
     print(f"Completed retrieval evaluation on {dataset_name}.\n")
 
@@ -63,7 +69,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         clustering_eval,
         dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col,
-        k_range = range(2, 12)
+        k_range = range(2, 12), random_state = random_state
     )
     print(f"Completed clustering evaluation on {dataset_name}.\n\n")
 

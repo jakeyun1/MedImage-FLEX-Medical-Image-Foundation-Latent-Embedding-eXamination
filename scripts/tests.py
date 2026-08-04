@@ -12,7 +12,12 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler, Normalizer
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, precision_recall_fscore_support
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import StratifiedKFold, KFold, cross_val_score
+from sklearn.model_selection import (
+    KFold,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    cross_val_score,
+)
 from sklearn.multioutput import MultiOutputClassifier
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
@@ -23,7 +28,42 @@ from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, s
 # Silence Optuna's extensive logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col):
+MULTILABEL_CLASS_NAMES = {
+    "chexpert": ["Cardiomegaly", "Pleural Effusion", "Edema", "Consolidation", "Atelectasis"],
+    "odir": ["Normal", "Diabetes", "Glaucoma", "Cataract", "AMD",
+             "Hypertension", "Myopia", "Other"],
+}
+
+
+def encode_labels(labels, dataset_name = None):
+    """
+    Encode a label series using the benchmark's multiclass/multilabel rules.
+    """
+    first_label = labels.iloc[0]
+    is_vector = isinstance(first_label, (list, tuple, np.ndarray))
+    is_multilabel = False
+
+    if is_vector:
+        label_matrix = np.stack(labels.to_numpy()).astype(int)
+        is_multilabel = bool(np.any(label_matrix.sum(axis = 1) >= 2))
+
+    if is_multilabel:
+        y = np.vstack(labels.to_numpy()).astype(int)
+        classes = MULTILABEL_CLASS_NAMES.get(
+            dataset_name, [f"Label {i}" for i in range(y.shape[1])]
+        )
+        if len(classes) != y.shape[1]:
+            raise ValueError("Multilabel class names do not match the label width.")
+    else:
+        le = LabelEncoder()
+        y = le.fit_transform(labels.astype(str).to_numpy())
+        classes = list(le.classes_)
+
+    return y, classes, is_multilabel
+
+
+def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+                            return_sample_ids = False):
     """
     Prepares the data for adapters. Allows for multilabel data to be labeled appropriately.
     Embeddings are ordered to be "paired" up with their associated image and target.
@@ -66,29 +106,10 @@ def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, 
 
     X = df.drop(columns = [id_col, label_col]).values
 
-    # Label type detection: multiclass v.s. multilabel
-    is_multilabel = False
-    first_label = df[label_col].iloc[0]
+    y, classes, is_multilabel = encode_labels(df[label_col], dataset_name)
 
-    is_vector = isinstance(first_label, (list, tuple, np.ndarray))
-
-    if is_vector:
-        label_matrix = np.stack(df[label_col].values)
-        label_matrix = label_matrix.astype(int)
-        row_sums = label_matrix.sum(axis = 1)
-
-        if np.any(row_sums >= 2):
-            is_multilabel = True
-
-    if is_multilabel:
-        # Stack the labels into a matrix
-        y = np.vstack(df[label_col].to_numpy()).astype(int)
-        classes = [f"Label {i}" for i in range(y.shape[1])]
-    else:
-        # Standard multiclass encoding
-        le = LabelEncoder()
-        y = le.fit_transform(df[label_col].astype(str).to_numpy())
-        classes = list(le.classes_)
+    if return_sample_ids:
+        return X, y, classes, is_multilabel, df[id_col].astype(str).to_numpy()
 
     return X, y, classes, is_multilabel
 
@@ -163,11 +184,99 @@ def _inner_cv_splitter(is_multilabel, y, n_splits, random_state):
 
     return _cv_splitter(is_multilabel, safe_splits, random_state)
 
+def _group_ids_for_samples(metadata_df, id_col, group_col, sample_ids):
+    if group_col is None:
+        return None
+
+    identifiers = metadata_df[[id_col, group_col]].dropna().copy()
+    identifiers[id_col] = identifiers[id_col].astype(str)
+    identifiers[group_col] = identifiers[group_col].astype(str)
+    if identifiers[id_col].duplicated().any():
+        raise ValueError("Grouping metadata contains duplicate sample IDs.")
+
+    group_by_sample = dict(zip(identifiers[id_col], identifiers[group_col]))
+    missing = [sample_id for sample_id in sample_ids if sample_id not in group_by_sample]
+    if missing:
+        raise ValueError(f"Grouping metadata is missing sample IDs: {missing[:5]}")
+    return np.asarray([group_by_sample[sample_id] for sample_id in sample_ids])
+
+def _inner_cv_splits(is_multilabel, y, groups, n_splits, random_state):
+    if groups is None:
+        cv = _inner_cv_splitter(is_multilabel, y, n_splits, random_state)
+        return list(_split_iter(cv, np.empty((len(y), 0)), y, is_multilabel))
+
+    groups = np.asarray(groups).astype(str)
+    safe_splits = min(n_splits, len(np.unique(groups)))
+    if is_multilabel:
+        for label_idx in range(y.shape[1]):
+            for value in (0, 1):
+                safe_splits = min(
+                    safe_splits, len(np.unique(groups[y[:, label_idx] == value]))
+                )
+        signatures = pd.Series(["|".join(row.astype(str)) for row in y])
+    else:
+        for class_id in np.unique(y):
+            safe_splits = min(safe_splits, len(np.unique(groups[y == class_id])))
+        signatures = pd.Series(y.astype(str))
+
+    if safe_splits < 2:
+        raise ValueError(
+            "At least two groups per class are required for inner cross-validation."
+        )
+
+    counts = signatures.value_counts()
+    strata = signatures.where(
+        signatures.map(counts) >= safe_splits, "__rare_label_combination__"
+    )
+    if strata.value_counts().min() < safe_splits:
+        strata = pd.Series("__all_samples__", index=signatures.index)
+
+    cv = StratifiedGroupKFold(
+        n_splits=safe_splits, shuffle=True, random_state=random_state
+    )
+    splits = list(cv.split(np.empty((len(y), 0)), strata, groups=groups))
+    for train_idx, validation_idx in splits:
+        if set(groups[train_idx]) & set(groups[validation_idx]):
+            raise RuntimeError("A group appears in both sides of an inner CV split.")
+    return splits
+
 def _split_iter(cv, X, y, is_multilabel):
     if is_multilabel:
         return cv.split(X)
 
     return cv.split(X, y)
+
+def _outer_split_iter(X, y, is_multilabel, n_splits, random_state,
+                      sample_ids, outer_folds, group_ids=None):
+    if outer_folds is None:
+        cv = _cv_splitter(is_multilabel, n_splits, random_state)
+        return _split_iter(cv, X, y, is_multilabel)
+
+    missing = [sample_id for sample_id in sample_ids if sample_id not in outer_folds]
+    if missing:
+        raise ValueError(f"Outer-fold manifest is missing sample IDs: {missing[:5]}")
+    if len(np.unique(sample_ids)) != len(sample_ids):
+        raise ValueError("Prepared benchmark data contains duplicate sample IDs.")
+    unused = sorted(set(outer_folds) - set(sample_ids))
+    if unused:
+        raise ValueError(f"Manifest samples are missing embeddings: {unused[:5]}")
+
+    fold_values = np.asarray([outer_folds[sample_id] for sample_id in sample_ids], dtype=int)
+    observed_folds = sorted(np.unique(fold_values).tolist())
+    if observed_folds != list(range(n_splits)):
+        raise ValueError(
+            f"Expected outer folds 0 through {n_splits - 1}; observed {observed_folds}."
+        )
+    if group_ids is not None:
+        group_folds = pd.DataFrame({"group": group_ids, "fold": fold_values})
+        if group_folds.groupby("group")["fold"].nunique().max() != 1:
+            raise ValueError("A group appears in more than one outer fold.")
+
+    indices = np.arange(len(X))
+    return [
+        (indices[fold_values != fold], indices[fold_values == fold])
+        for fold in observed_folds
+    ]
 
 def _extract_positive_proba(proba):
     if isinstance(proba, list):
@@ -251,7 +360,8 @@ def _most_common_params(params_by_fold):
 
 
 def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
-           label_col, n_splits = 5, random_state = 42, n_trials = 20):
+           label_col, n_splits = 5, random_state = 42, n_trials = 20,
+           outer_folds = None, group_col = None):
     """
     Tests the embeddings on an MLP adapter.
 
@@ -269,10 +379,18 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     Returns:
         summary : JSON-compatible summary of the MLP test
     """
-    X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
-                                                image_paths, id_col, label_col)
+    X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
+        dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+        return_sample_ids = True
+    )
+    group_ids = _group_ids_for_samples(
+        metadata_df, id_col, group_col, sample_ids
+    )
 
-    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    outer_splits = _outer_split_iter(
+        X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
+        group_ids
+    )
     scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
 
     print(f"--- Optimizing MLP with Optuna ({n_trials} trials) ---")
@@ -300,11 +418,15 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     y_true_parts = []
     y_pred_parts = []
 
-    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+    optuna_seeds = []
+    for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
-        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
-        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
+        train_groups = None if group_ids is None else group_ids[train_idx]
+        inner_cv = _inner_cv_splits(
+            is_multilabel, y_train, train_groups, 3, random_state
+        )
+        inner_folds_by_fold.append(len(inner_cv))
 
         def objective(trial):
             """
@@ -327,7 +449,12 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
             )
             return scores.mean()
 
-        study = optuna.create_study(direction = "maximize")
+        optuna_seed = random_state + fold_idx - 1
+        optuna_seeds.append(int(optuna_seed))
+        study = optuna.create_study(
+            direction = "maximize",
+            sampler = optuna.samplers.TPESampler(seed = optuna_seed)
+        )
         study.optimize(objective, n_trials = n_trials)
         best_params_by_fold.append(study.best_params)
 
@@ -362,6 +489,12 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         "outer_folds": int(n_splits),
         "inner_folds": inner_folds_by_fold,
         "random_state": int(random_state),
+        "optuna_seeds": optuna_seeds,
+        "outer_folds_source": "manifest" if outer_folds is not None else "generated",
+        "inner_fold_strategy": (
+            "stratified_group_kfold" if group_col is not None else "sample_level"
+        ),
+        "inner_fold_unit": group_col if group_col is not None else "sample_id",
         "tuning_metric": scoring_auc,
         "n_trials": int(n_trials)
     }
@@ -381,7 +514,8 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     return summary, dataset_info
 
 def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-           n_splits = 5, random_state = 42, n_trials = 15):
+           n_splits = 5, random_state = 42, n_trials = 15, outer_folds = None,
+           group_col = None):
     """
     Tests the embeddings on a KNN adapter.
 
@@ -399,8 +533,13 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     Returns:
         summary : JSON-compatible summary of the KNN test
     """
-    X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
-                                                image_paths, id_col, label_col)
+    X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
+        dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+        return_sample_ids = True
+    )
+    group_ids = _group_ids_for_samples(
+        metadata_df, id_col, group_col, sample_ids
+    )
 
     def build_pipe(params):
         clf = KNeighborsClassifier(
@@ -413,7 +552,10 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         return pipe
 
     print(f"--- Optimizing KNN with Optuna ({n_trials} trials) ---")
-    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    outer_splits = _outer_split_iter(
+        X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
+        group_ids
+    )
     fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
     fold_score_rows = []
     best_params_by_fold = []
@@ -421,11 +563,15 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     y_true_parts = []
     y_pred_parts = []
 
-    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+    optuna_seeds = []
+    for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
-        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
-        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
+        train_groups = None if group_ids is None else group_ids[train_idx]
+        inner_cv = _inner_cv_splits(
+            is_multilabel, y_train, train_groups, 3, random_state
+        )
+        inner_folds_by_fold.append(len(inner_cv))
 
         def objective(trial):
             """
@@ -446,7 +592,12 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
             ).mean()
             return score
 
-        study = optuna.create_study(direction = "maximize")
+        optuna_seed = random_state + fold_idx - 1
+        optuna_seeds.append(int(optuna_seed))
+        study = optuna.create_study(
+            direction = "maximize",
+            sampler = optuna.samplers.TPESampler(seed = optuna_seed)
+        )
         study.optimize(objective, n_trials = n_trials)
         best_params_by_fold.append(study.best_params)
 
@@ -492,6 +643,12 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
             "outer_folds": int(n_splits),
             "inner_folds": inner_folds_by_fold,
             "random_state": int(random_state),
+            "optuna_seeds": optuna_seeds,
+            "outer_folds_source": "manifest" if outer_folds is not None else "generated",
+            "inner_fold_strategy": (
+                "stratified_group_kfold" if group_col is not None else "sample_level"
+            ),
+            "inner_fold_unit": group_col if group_col is not None else "sample_id",
             "tuning_metric": "f1_weighted",
             "n_trials": int(n_trials)
         }
@@ -507,7 +664,8 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     return summary
 
 def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-                           n_splits = 5, random_state = 42, n_trials = 15):
+                           n_splits = 5, random_state = 42, n_trials = 15,
+                           outer_folds = None, group_col = None):
     """
     Tests the embeddings on a LR adapter.
 
@@ -525,10 +683,18 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     Returns:
         summary : JSON-compatible summary of the LR test
     """
-    X, y, classes, is_multilabel = prepare_data_multilabel(dataset_name, embeddings, metadata_df,
-                                                image_paths, id_col, label_col)
+    X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
+        dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+        return_sample_ids = True
+    )
+    group_ids = _group_ids_for_samples(
+        metadata_df, id_col, group_col, sample_ids
+    )
 
-    cv = _cv_splitter(is_multilabel, n_splits, random_state)
+    outer_splits = _outer_split_iter(
+        X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
+        group_ids
+    )
     scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
 
     print(f"--- Optimizing Logistic Regression with Optuna ({n_trials} trials) ---")
@@ -543,7 +709,8 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
             C = params["C"],
             max_iter = max_iter,
             class_weight = "balanced",
-            solver = solver
+            solver = solver,
+            random_state = random_state
         )
 
         if is_multilabel:
@@ -560,11 +727,15 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     y_true_parts = []
     y_pred_parts = []
 
-    for fold_idx, (train_idx, test_idx) in enumerate(_split_iter(cv, X, y, is_multilabel), start = 1):
+    optuna_seeds = []
+    for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
-        inner_cv = _inner_cv_splitter(is_multilabel, y_train, 3, random_state)
-        inner_folds_by_fold.append(int(inner_cv.get_n_splits()))
+        train_groups = None if group_ids is None else group_ids[train_idx]
+        inner_cv = _inner_cv_splits(
+            is_multilabel, y_train, train_groups, 3, random_state
+        )
+        inner_folds_by_fold.append(len(inner_cv))
 
         def objective(trial):
             """
@@ -582,7 +753,12 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
                 n_jobs = -1
             ).mean()
 
-        study = optuna.create_study(direction = "maximize")
+        optuna_seed = random_state + fold_idx - 1
+        optuna_seeds.append(int(optuna_seed))
+        study = optuna.create_study(
+            direction = "maximize",
+            sampler = optuna.samplers.TPESampler(seed = optuna_seed)
+        )
         study.optimize(objective, n_trials = n_trials)
         best_params_by_fold.append(study.best_params)
 
@@ -617,6 +793,12 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         "outer_folds": int(n_splits),
         "inner_folds": inner_folds_by_fold,
         "random_state": int(random_state),
+        "optuna_seeds": optuna_seeds,
+        "outer_folds_source": "manifest" if outer_folds is not None else "generated",
+        "inner_fold_strategy": (
+            "stratified_group_kfold" if group_col is not None else "sample_level"
+        ),
+        "inner_fold_unit": group_col if group_col is not None else "sample_id",
         "tuning_metric": scoring_auc,
         "n_trials": int(n_trials)
     }
@@ -921,8 +1103,10 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         results_dict["best_silhouette"] = [int(best_k_sil['k']), float(best_k_sil['Silhouette'])]
         results_dict["silhouette_selected_k"] = row_summary(best_k_sil)
 
-    if dataset_name == "chexpert":
-        results_dict["note"] = ("For CheXpert, clustering classes are unique multilabel "
-                                "combinations and should be interpreted as exploratory.")
+    if dataset_name in ("chexpert", "odir"):
+        results_dict["note"] = (
+            "Clustering classes are unique multilabel combinations and should "
+            "be interpreted as exploratory."
+        )
 
     return results_dict
