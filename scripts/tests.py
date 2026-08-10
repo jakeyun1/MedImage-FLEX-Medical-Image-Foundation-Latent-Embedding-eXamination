@@ -30,7 +30,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 MULTILABEL_CLASS_NAMES = {
     "chexpert": ["Cardiomegaly", "Pleural Effusion", "Edema", "Consolidation", "Atelectasis"],
-    "cbis_ddsm": ["BENIGN", "MALIGNANT", "BENIGN_WITHOUT_CALLBACK"]
+    "cbis_ddsm": ["mass_BENIGN", "mass_MALIGNANT", "mass_BENIGN_WITHOUT_CALLBACK",
+                  "calc_BENIGN", "calc_MALIGNANT", "calc_BENIGN_WITHOUT_CALLBACK"]
 }
 
 def encode_labels(labels, dataset_name = None):
