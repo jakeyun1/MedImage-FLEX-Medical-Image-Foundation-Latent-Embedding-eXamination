@@ -26,10 +26,9 @@
                        (optional, default is 5000)
     },
 
-    "embeddings": {
-        "normalize": Flag for normalizing embeddings (optional, default is true),
-        "cache": Flag for caching embeddings (optional, default is false)
-    },
+    "normalize_embeddings": Flag for normalizing embeddings (optional, default is true),
+
+    "cache_embeddings": Flag for caching embeddings (optional, default is false),
 
     "random_baseline": {
         "enabled": Run the complete benchmark on dimension-matched random Gaussian
@@ -89,9 +88,7 @@
         "max_samples": 5000
     },
 
-    "embeddings": {
-        "cache": true
-    },
+    "cache_embeddings": true,
 
     "random_baseline": {
         "enabled": true,
@@ -148,15 +145,9 @@ result records the manifest path and SHA-256 checksum.
     - PAD-UFES-20: `"pad_ufes"`
     - HAM10000: `"ham10000"`
 - **Mammograms**
-    - CBIS-DDSM abnormality crops: `"cbis_ddsm"`
+    - CBIS-DDSM: `"cbis_ddsm"`
 - **Ocular fundi**
     - ODIR-5K: `"odir"`
-
-CBIS-DDSM uses protocol `cbis_ddsm_cropped_v1`: one cropped abnormality image
-per pathology row from the configured mass and calcification training metadata.
-The loader records any recovered or excluded source rows in the result metadata,
-and the protocol name separates its caches and manifests from the previous
-full-mammogram workflow.
 
 ## Citations
 Irvin et al. CheXpert Chest X-rays. Stanford AIMI, 2025. doi:10.71718/y7pj-4v93.​
@@ -165,6 +156,6 @@ Pacheco et al. PAD-UFES-20: Skin lesions from smartphones. Mendeley Data, 2020. 
 
 Tschandl et al. The HAM10000 dataset. Harvard Dataverse, 2018. doi:10.7910/DVN/DBW86T.​
 
-Lee et al. CBIS-DDSM: Curated Breast Imaging Subset. TCIA, 2016. doi:10.7937/K9/TCIA.2016.7O02S9CY.​
+Breast Cancer JPG Image Dataset of CBIS-DDSM. Kaggle, 2024. [Online]. [https://www.kaggle.com/datasets/debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm.​](https://www.kaggle.com/datasets/debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm)
 
 ODIR-5K: Ocular Disease Intelligent Recognition. Kaggle, 2025. [Online]. [https://www.kaggle.com/datasets/andrewmvd/ocular-disease-recognition-odir5k.​](https://www.kaggle.com/datasets/andrewmvd/ocular-disease-recognition-odir5k)

@@ -9,7 +9,6 @@ import pandas as pd
 import kagglehub
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
-from scripts.cbis_ddsm import CBIS_PROTOCOL, prepare_cbis_ddsm_crops
 
 # Map to link datasets to their respective paths and their respective CSV data
 # FIXME: Change dataset paths as needed
@@ -18,8 +17,8 @@ DATASET_MAP = {
             "CSV_NAMES": ["metadata.csv"]},
     "chexpert": {"dataset_path": kagglehub.dataset_download("ashery/chexpert"),
             "CSV_NAMES": ["train.csv"], "IMAGE_DIRECTORY": "train"},
-    "cbis_ddsm": {"dataset_path": kagglehub.dataset_download("awsaf49/cbis-ddsm-breast-cancer-image-dataset"),
-            "CSV_NAMES": ["dicom_info.csv", "calc_case_description_train_set.csv", "mass_case_description_train_set.csv"]},
+    "cbis_ddsm": {"dataset_path": kagglehub.dataset_download("debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm"),
+            "CSV_NAMES": ["calc_case(with_jpg_img).csv", "mass_case(with_jpg_img).csv"]},
     "odir": {"dataset_path": kagglehub.dataset_download("andrewmvd/ocular-disease-recognition-odir5k"),
             "CSV_NAMES": ["full_df.csv"],
             "IMAGE_DIRECTORY": f"ODIR-5K{os.sep}Training Images"},
@@ -89,13 +88,11 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
     metadata_df = pd.DataFrame()
 
     if dataset_name == "cbis_ddsm":
-        mapping_df = None
+        PATHOLOGIES = ["BENIGN", "MALIGNANT", "BENIGN_WITHOUT_CALLBACK"]
+
         for dirpath, dirnames, filenames in os.walk(dataset_path):
             for file in filenames:
                 if file.endswith(".csv") and file in CSV_NAMES:
-                    if file == "dicom_info.csv":
-                        mapping_df = pd.read_csv(os.path.join(dirpath, file))
-                    else:
                         csv_paths.append(os.path.join(dirpath, file))
                 elif file.endswith((".png", ".jpg", ".jpeg")) and not file.startswith("."):
                     image_paths.append(os.path.join(dirpath, file))
@@ -104,20 +101,149 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         
         for csv in csv_paths:
             curr_df = pd.read_csv(csv)
+
+            # Ensure multilabel diagnoses (e.g. BENIGN -> mass_BENIGN)
+            curr_df["pathology"] = curr_df["abnormality type"] + "_" + curr_df["pathology"]
             metadata_df = pd.concat([metadata_df, curr_df], ignore_index = True)
 
-        if mapping_df is None:
-            raise FileNotFoundError("CBIS-DDSM dicom_info.csv was not found.")
-        metadata_df, image_paths, cbis_audit = prepare_cbis_ddsm_crops(
-            metadata_df, mapping_df, image_paths
+        image_columns = [
+            "jpg_fullMammo_img_path",
+            "jpg_crop_img_path",
+            "jpg_ROI_img_path"
+        ]
+
+        # Temporary DataFrame used for valid image filtering
+        image_df = metadata_df[["pathology"] + image_columns].copy()
+
+        image_df["metadata_index"] = image_df.index
+
+        # Convert the three image columns into one image_path column
+        image_df = image_df.melt(
+            id_vars = ["metadata_index", "pathology"],
+            value_vars = image_columns,
+            value_name = "image_path"
         )
-        print(
-            "CBIS-DDSM cropped protocol: "
-            f"{cbis_audit['usable_crops']}/{cbis_audit['input_rows']} usable rows, "
-            f"{cbis_audit['roi_fallback_rows']} recovered via ROI reference, "
-            f"{cbis_audit['excluded_rows']} excluded."
+
+        # Remove missing image paths
+        image_df = image_df.dropna(
+            subset=["image_path"]
         )
-    
+
+        # Split pathology into abnormality type + diagnosis
+        #  e.g. mass_BENIGN
+        #        -> mass
+        #        -> BENIGN
+        image_df[
+            ["abnormality_type", "diagnosis"]
+        ] = (
+            image_df["pathology"]
+            .str.split("_", n = 1, expand = True)
+        )
+
+        # For each image + abnormality type, collect all unique diagnoses.
+        diagnoses_by_image = (
+            image_df
+            .groupby(
+                ["image_path", "abnormality_type"]
+            )["diagnosis"]
+            .agg(set)
+        )
+
+        # Find conflicting image + abnormality combinations.
+        conflicting_annotations = {
+            (image_path, abnormality_type)
+            for (
+                image_path,
+                abnormality_type
+            ), diagnoses in diagnoses_by_image.items()
+            if len(
+                diagnoses.intersection(PATHOLOGIES)
+            ) > 1
+        }
+
+
+        # Find the original metadata rows involved in conflicts
+        conflict_mask = image_df.apply(
+            lambda row: (
+                row["image_path"],
+                row["abnormality_type"]
+            ) in conflicting_annotations,
+            axis = 1
+        )
+
+        conflicting_metadata_indices = set(
+            image_df.loc[
+                conflict_mask,
+                "metadata_index"
+            ]
+        )
+
+        # Remove the metadata rows involved in conflicts.
+        metadata_df = (
+            metadata_df[
+                ~metadata_df.index.isin(
+                    conflicting_metadata_indices
+                )
+            ]
+            .reset_index(drop = True)
+        )
+
+        # Determine which images are no longer represented by any remaining metadata row
+        remaining_image_paths = set(
+            metadata_df[image_columns]
+            .stack()
+            .dropna()
+        )
+
+        # Remove images that no longer have any valid metadata associated with them.
+        image_paths = [
+            path
+            for path in image_paths
+            if any(
+                remaining_path in path
+                for remaining_path in remaining_image_paths
+            )
+        ]
+
+        # Make a single, unified `image path` column
+        image_df = metadata_df[["pathology"] + image_columns].melt(
+            id_vars = "pathology",
+            value_vars = image_columns,
+            value_name = "image path"
+        )
+
+        # Remove missing image paths
+        image_df = image_df.dropna(
+            subset=["image path"]
+        )
+
+        # Remove duplicate image + pathology pairs
+        image_df = image_df.drop_duplicates(
+            subset = ["image path", "pathology"]
+        )
+
+        # Aggregate all valid diagnoses associated with each image
+        #
+        # e.g.
+        #     image1.jpg | mass_BENIGN
+        #     image1.jpg | calcification_BENIGN
+        #
+        # becomes:
+        #     image1.jpg | [mass_BENIGN, calcification_BENIGN]
+        metadata_df = (
+            image_df
+            .groupby(
+                "image path",
+                as_index = False
+            )
+            .agg(
+                pathology = ("pathology", list)
+            )
+        )
+
+        # Prepare image path column for merging
+        metadata_df["image path"] = metadata_df["image path"].apply(lambda path : "/".join(path.split("/")[-2:]))
+            
     elif dataset_name == "ham10000":
         for dirpath, dirnames, filenames in os.walk(dataset_path):
             for file in filenames:
@@ -169,17 +295,12 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             return os.sep.join(path.split("/")[-3:])
 
         metadata_df["Path"] = metadata_df["Path"].apply(get_relative_path)
-        metadata_df["patient_id"] = metadata_df["Path"].map(
-            lambda path: path.split(os.sep)[0]
-        )
 
         # Image paths inputed into the GeneralDataset are those from the desired .csv files
         desired_paths = set(metadata_df["Path"])
         image_paths = [path for path in image_paths if os.sep.join(path.split(os.sep)[-3:]) in desired_paths]
         
     elif dataset_name == "odir":
-        LABEL_COLS = ["N", "D", "G", "C", "A", "H", "M", "O"]
-
         for dirpath, dirnames, filenames in os.walk(dataset_path):
             for file in filenames:
                 if file.endswith(".csv") and file in CSV_NAMES:
@@ -193,10 +314,7 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         for csv in csv_paths:
             curr_df = pd.read_csv(csv)
             metadata_df = pd.concat([metadata_df, curr_df], ignore_index = True)
-
-        # Preserve all diagnoses instead of the dataset's single-label target field.
-        metadata_df["target"] = metadata_df[LABEL_COLS].astype(int).values.tolist()
-
+            
         # Image paths inputed into the GeneralDataset are those from the desired .csv files
         images_present = list(metadata_df["filename"])
         image_paths = [path for path in image_paths if os.path.basename(path) in images_present]
@@ -220,8 +338,5 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
     dataloader = DataLoader(general_dataset, batch_size, shuffle, \
             collate_fn = custom_collate_function, num_workers = num_workers)
     dataloader.dataset_name = dataset_name
-    dataloader.protocol_name = CBIS_PROTOCOL if dataset_name == "cbis_ddsm" else dataset_name
-    if dataset_name == "cbis_ddsm":
-        dataloader.dataset_audit = cbis_audit
     
     return dataloader, metadata_df

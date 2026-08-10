@@ -1,4 +1,6 @@
 """
+permuted_baseline.py
+
 Evaluate genuine embeddings after breaking their image correspondence.
 """
 

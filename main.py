@@ -14,7 +14,7 @@ from time import perf_counter
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
 
 # Format: (id_col, label_col)
-DATASET_COL_MAP = {"pad_ufes": ("img_id", "diagnostic"), "cbis_ddsm": ("cropped image file path", "pathology"),
+DATASET_COL_MAP = {"pad_ufes": ("img_id", "diagnostic"), "cbis_ddsm": ("image path", "pathology"),
                    "odir": ("filename", "target"), "ham10000": ("image_id", "dx"),
                    "chexpert": ("Path", "Diagnosis")}
 GROUP_COL_MAP = {"pad_ufes": "patient_id", "cbis_ddsm": "patient_id",
@@ -92,20 +92,24 @@ def main():
     batch_size = cfg["dataset"].get("batch_size", 32)
     shuffle = cfg["dataset"].get("shuffle", False)
 
-    normalize_embeddings = cfg["embeddings"].get("normalize", True)
-    cache_embeddings = cfg["embeddings"].get("cache", False)
+    normalize_embeddings = cfg.get("normalize_embeddings", True)
+    cache_embeddings = cfg.get("cache_embeddings", False)
+
     random_baseline_cfg = cfg.get("random_baseline", {})
     run_random_embeddings = random_baseline_cfg.get("enabled", False)
     random_baseline_repeats = int(random_baseline_cfg.get("repeats", 20))
     random_baseline_seed = int(random_baseline_cfg.get("seed", 42))
     overwrite_random_baseline = random_baseline_cfg.get("overwrite", False)
+
     label_prior_cfg = cfg.get("label_prior_baseline", {})
     run_label_prior = label_prior_cfg.get("enabled", False)
+
     permuted_baseline_cfg = cfg.get("permuted_baseline", {})
     run_permuted_embeddings = permuted_baseline_cfg.get("enabled", False)
     permuted_baseline_repeats = int(permuted_baseline_cfg.get("repeats", 20))
     permuted_baseline_seed = int(permuted_baseline_cfg.get("seed", 42))
     overwrite_permuted_baseline = permuted_baseline_cfg.get("overwrite", False)
+
     reproducibility_cfg = cfg.get("reproducibility", {})
     max_samples = cfg["dataset"].get("max_samples", 5000)
     if max_samples is not None:
@@ -188,8 +192,6 @@ def main():
             f"Using {len(metadata_df)} samples from reproducibility manifest: "
             f"{manifest_info['path']}"
         )
-        if hasattr(dataloader, "dataset_audit"):
-            manifest_info["dataset_preparation"] = dataloader.dataset_audit
 
         # Extract embeddings
         embedding_start = perf_counter()

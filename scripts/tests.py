@@ -30,10 +30,8 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 MULTILABEL_CLASS_NAMES = {
     "chexpert": ["Cardiomegaly", "Pleural Effusion", "Edema", "Consolidation", "Atelectasis"],
-    "odir": ["Normal", "Diabetes", "Glaucoma", "Cataract", "AMD",
-             "Hypertension", "Myopia", "Other"],
+    "cbis_ddsm": ["BENIGN", "MALIGNANT", "BENIGN_WITHOUT_CALLBACK"]
 }
-
 
 def encode_labels(labels, dataset_name = None):
     """
@@ -88,7 +86,7 @@ def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, 
     if dataset_name == "chexpert":
         image_names = [os.sep.join(path.split(os.sep)[-3:]) for path in image_paths]
     elif dataset_name == "cbis_ddsm":
-        image_names = [os.sep.join(path.split(os.sep)[-2:]) for path in image_paths]
+        image_names = ["/".join(path.split(os.sep)[-2:]) for path in image_paths]
     else:
         image_names = [os.path.basename(path) for path in image_paths]
 
@@ -137,7 +135,7 @@ def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, 
     if dataset_name == "chexpert":
         image_names = [os.sep.join(path.split(os.sep)[-3:]) for path in image_paths]
     elif dataset_name == "cbis_ddsm":
-        image_names = [os.sep.join(path.split(os.sep)[-2:]) for path in image_paths]
+        image_names = ["/".join(path.split(os.sep)[-2:]) for path in image_paths]
     else:
         image_names = [os.path.basename(path) for path in image_paths]
 
@@ -1103,7 +1101,7 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         results_dict["best_silhouette"] = [int(best_k_sil['k']), float(best_k_sil['Silhouette'])]
         results_dict["silhouette_selected_k"] = row_summary(best_k_sil)
 
-    if dataset_name in ("chexpert", "odir"):
+    if dataset_name in ("cbis_ddsm", "odir"):
         results_dict["note"] = (
             "Clustering classes are unique multilabel combinations and should "
             "be interpreted as exploratory."

@@ -42,19 +42,9 @@ def build_backend(model_id: str) -> EmbeddingBackend:
         return HuggingFaceVisionBackend(model_id, device, output_key = "pooler_output")
     
     if model_id == "mobilenet_v2":
-        device = torch.device("cpu") # Default to using CPU-only for TensorFlow models
+        device = "cpu"
 
-        device_str = str(device)
-
-        if device_str == "cpu":
-            # Force TensorFlow to use CPU only; hide all GPU devices from TF
-            tf.config.set_visible_devices([], 'GPU')
-
-        # GPU Memory Protection
-        else:
-            gpus = tf.config.list_physical_devices("GPU")
-            for gpu in gpus:
-                tf.config.experimental.set_memory_growth(gpu, True)
+        tf.config.set_visible_devices([], "GPU")
 
         model = tf.keras.applications.MobileNetV2(input_shape = (224, 224, 3),
                                                   include_top = False, pooling = "avg")
