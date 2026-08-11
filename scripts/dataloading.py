@@ -107,9 +107,7 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             metadata_df = pd.concat([metadata_df, curr_df], ignore_index = True)
 
         image_columns = [
-            "jpg_fullMammo_img_path",
-            "jpg_crop_img_path",
-            "jpg_ROI_img_path"
+            "jpg_fullMammo_img_path"
         ]
 
         # Temporary DataFrame used for valid image filtering
@@ -161,7 +159,6 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             ) > 1
         }
 
-
         # Find the original metadata rows involved in conflicts
         conflict_mask = image_df.apply(
             lambda row: (
@@ -205,44 +202,62 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
             )
         ]
 
-        # Make a single, unified `image path` column
-        image_df = metadata_df[["pathology"] + image_columns].melt(
-            id_vars = "pathology",
+        # Make a single, unified `image path` column while keeping all of the original metadata columns
+        image_df = metadata_df.melt(
+            id_vars = [
+                col for col in metadata_df.columns
+                if col not in image_columns
+            ],
             value_vars = image_columns,
             value_name = "image path"
         )
 
         # Remove missing image paths
         image_df = image_df.dropna(
-            subset=["image path"]
+            subset = ["image path"]
         )
 
-        # Remove duplicate image + pathology pairs
+        # Extract the shared scan identifier (e.g., P_00001_LEFT_CC)
+        scan_ids = image_df["image path"].str.extract(r"(P_\d+_(?:LEFT|RIGHT)_(?:CC|MLO))")[0]
+        
+        # Add a grouping column, falling back to the image path if no match is found
+        image_df["scan_id"] = scan_ids.fillna(image_df["image path"])
+
+        # Remove duplicate scan_id + pathology pairs
         image_df = image_df.drop_duplicates(
-            subset = ["image path", "pathology"]
+            subset = ["scan_id", "pathology"]
         )
 
-        # Aggregate all valid diagnoses associated with each image
-        #
-        # e.g.
-        #     image1.jpg | mass_BENIGN
-        #     image1.jpg | calcification_BENIGN
-        #
-        # becomes:
-        #     image1.jpg | [mass_BENIGN, calcification_BENIGN]
+        # Everything except the structural columns should be preserved as metadata
+        metadata_columns = [
+            col
+            for col in image_df.columns
+            if col not in ["image path", "image_type", "pathology", "scan_id"]
+        ]
+
+        # Aggregate pathology into a list, while keeping the other metadata columns
+        aggregation = {
+            "pathology": lambda x: list(dict.fromkeys(x)),
+            "image path": "first"  # Pick one valid path representing a scan
+        }
+
+        aggregation.update({
+            col: "first"
+            for col in metadata_columns
+        })
+
+        # Group by the extracted identifier to merge Mass and Calcification labels
         metadata_df = (
             image_df
             .groupby(
-                "image path",
+                "scan_id",
                 as_index = False
             )
-            .agg(
-                pathology = ("pathology", list)
-            )
+            .agg(aggregation)
         )
 
         # Prepare image path column for merging
-        metadata_df["image path"] = metadata_df["image path"].apply(lambda path : "/".join(path.split("/")[-2:]))
+        metadata_df["image path"] = metadata_df["image path"].apply(lambda path: "/".join(path.split("/")[-2:]))
             
     elif dataset_name == "ham10000":
         for dirpath, dirnames, filenames in os.walk(dataset_path):

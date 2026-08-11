@@ -3,6 +3,7 @@ __pycache__/
 *.swp
 embeddings/
 results/
+manifests/
 configs/
 scripts/__pycache__/
 *.sh

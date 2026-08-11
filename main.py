@@ -175,7 +175,7 @@ def main():
 
         metadata_df, fold_assignments, manifest_info = prepare_experiment_manifest(
             metadata_df,
-            dataset_name = dataloader.protocol_name,
+            dataset_name = dataloader.dataset_name,
             id_col = id_col,
             label_col = label_col,
             manifest_dir = manifest_dir,
@@ -222,7 +222,6 @@ def main():
         emb_array = np.asarray(embeddings)
         results["embedding_info"] = {
             "model_id": model_id,
-            "dataset_protocol": dataloader.protocol_name,
             "embedding_dim": int(emb_array.shape[1]),
             "normalized": normalize_embeddings,
             "n_embeddings": int(emb_array.shape[0]),

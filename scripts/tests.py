@@ -8,7 +8,7 @@ import os
 import numpy as np
 import pandas as pd
 import optuna
-from sklearn.preprocessing import LabelEncoder, StandardScaler, Normalizer
+from sklearn.preprocessing import LabelEncoder, StandardScaler, Normalizer, MultiLabelBinarizer
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, precision_recall_fscore_support
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
@@ -31,7 +31,7 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 MULTILABEL_CLASS_NAMES = {
     "chexpert": ["Cardiomegaly", "Pleural Effusion", "Edema", "Consolidation", "Atelectasis"],
     "cbis_ddsm": ["mass_BENIGN", "mass_MALIGNANT", "mass_BENIGN_WITHOUT_CALLBACK",
-                  "calc_BENIGN", "calc_MALIGNANT", "calc_BENIGN_WITHOUT_CALLBACK"]
+                  "calcification_BENIGN", "calcification_MALIGNANT", "calcification_BENIGN_WITHOUT_CALLBACK"]
 }
 
 def encode_labels(labels, dataset_name = None):
@@ -40,26 +40,40 @@ def encode_labels(labels, dataset_name = None):
     """
     first_label = labels.iloc[0]
     is_vector = isinstance(first_label, (list, tuple, np.ndarray))
-    is_multilabel = False
+    
+    if is_vector and len(first_label) > 0:
+        # Lists of strings
+        if isinstance(first_label[0], str):
+            classes_to_use = MULTILABEL_CLASS_NAMES.get(dataset_name)
+            mlb = MultiLabelBinarizer(classes=classes_to_use)
+            y = mlb.fit_transform(labels)
+            classes = list(mlb.classes_)
+            
+            # Force multilabel if the dataset is defined in the dictionary
+            is_multilabel = dataset_name in MULTILABEL_CLASS_NAMES
+            
+            if is_multilabel:
+                return y, classes, True
+                
+        # Already numeric vectors
+        elif isinstance(first_label[0], (int, float, bool, np.number)):
+            y = np.stack(labels.to_numpy()).astype(int)
+            is_multilabel = dataset_name in MULTILABEL_CLASS_NAMES
+            
+            if is_multilabel:
+                classes = MULTILABEL_CLASS_NAMES.get(
+                    dataset_name, [f"Label {i}" for i in range(y.shape[1])]
+                )
+                if len(classes) != y.shape[1]:
+                    raise ValueError("Multilabel class names do not match the label width.")
+                return y, classes, True
 
-    if is_vector:
-        label_matrix = np.stack(labels.to_numpy()).astype(int)
-        is_multilabel = bool(np.any(label_matrix.sum(axis = 1) >= 2))
+    # Multiclass
+    le = LabelEncoder()
+    y = le.fit_transform(labels.astype(str).to_numpy())
+    classes = list(le.classes_)
 
-    if is_multilabel:
-        y = np.vstack(labels.to_numpy()).astype(int)
-        classes = MULTILABEL_CLASS_NAMES.get(
-            dataset_name, [f"Label {i}" for i in range(y.shape[1])]
-        )
-        if len(classes) != y.shape[1]:
-            raise ValueError("Multilabel class names do not match the label width.")
-    else:
-        le = LabelEncoder()
-        y = le.fit_transform(labels.astype(str).to_numpy())
-        classes = list(le.classes_)
-
-    return y, classes, is_multilabel
-
+    return y, classes, False
 
 def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                             return_sample_ids = False):
@@ -334,7 +348,14 @@ def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None):
     proba = _extract_positive_proba(pipe.predict_proba(X_test))
 
     if is_multilabel:
-        scores["roc_auc"] = roc_auc_score(y_test, proba, average = "macro")
+        # Only calculate ROC-AUC for columns that contain both 0s and 1s in y_test
+        valid_cols = [i for i in range(y_test.shape[1]) if len(np.unique(y_test[:, i])) > 1]
+        
+        if len(valid_cols) > 0:
+            scores["roc_auc"] = roc_auc_score(y_test[:, valid_cols], proba[:, valid_cols], average = "macro")
+        else:
+            scores["roc_auc"] = np.nan
+            
     elif proba.shape[1] == 2:
         scores["roc_auc"] = roc_auc_score(y_test, proba[:, 1])
     else:
