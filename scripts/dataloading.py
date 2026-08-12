@@ -305,6 +305,13 @@ def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = Fals
         # Custom multi-label "Diagnosis" column
         metadata_df["Diagnosis"] = metadata_df[LABEL_COLS].astype(int).values.tolist()
 
+        # Function for retrieving the patient ID for each image
+        def get_patient_id(path):
+            return path.split("/")[-3]
+
+        # Create the custom grouping column
+        metadata_df["patient_id"] = metadata_df["Path"].apply(get_patient_id)
+
         # Function for retrieving the unique relative paths for each image
         def get_relative_path(path):
             return os.sep.join(path.split("/")[-3:])
