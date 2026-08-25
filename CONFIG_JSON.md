@@ -21,7 +21,9 @@
         "shuffle": Flag for shuffling images while computing embeddings
                    (optional, default is false),
 
-        "max_samples": Maximum number of samples in the evaluation cohort;
+        "max_samples": Approximate number of images in the evaluation cohort;
+                       complete patient/lesion groups are selected, so the actual
+                       count may be slightly above or below this target;
                        null uses all eligible samples
                        (optional, default is 5000)
     },
@@ -132,11 +134,12 @@ selected cohort are permuted with no fixed points, while image paths and labels
 remain fixed.
 
 The first run for a dataset creates a cohort manifest containing its exact sample
-IDs, grouping IDs, label signatures, and outer-fold assignments. Outer and inner
-tuning folds are grouped by patient for PAD-UFES, CBIS-DDSM, CheXpert, and ODIR,
-and by lesion for HAM10000, whose metadata does not provide patient IDs. Later
-model runs with the same configuration validate and reuse that manifest. Every
-result records the manifest path and SHA-256 checksum.
+IDs, grouping IDs, label signatures, and outer-fold assignments. Cohort selection,
+outer folds, and inner tuning folds preserve complete patient groups for PAD-UFES,
+CBIS-DDSM, CheXpert, and ODIR, and complete lesion groups for HAM10000, whose
+metadata does not provide patient IDs. Later model runs with the same configuration
+validate and reuse that manifest. Every result records the manifest path and SHA-256
+checksum, along with the requested and actual cohort sizes.
 
 ## Datasets
 - **Chest radiographs**

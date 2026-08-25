@@ -11,17 +11,9 @@ import numpy as np
 from datetime import datetime
 from time import perf_counter
 
+from scripts.dataset_contracts import get_dataset_contract
+
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
-
-# Format: (id_col, label_col)
-DATASET_COL_MAP = {"pad_ufes": ("img_id", "diagnostic"), "cbis_ddsm": ("image path", "pathology"),
-                   "odir": ("filename", "target"), "ham10000": ("image_id", "dx"),
-                   "chexpert": ("Path", "Diagnosis")}
-GROUP_COL_MAP = {"pad_ufes": "patient_id", "cbis_ddsm": "patient_id",
-                 "odir": "ID", "ham10000": "lesion_id", "chexpert": "patient_id"}
-
-ID_COL_IDX = 0
-LABEL_COL_IDX = 1
 
 # Make the working directory relative to the testbench
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -138,6 +130,7 @@ def main():
 
     # Load dependecies once JSON file is parsed
     from scripts.dataloading import load_dataset
+    from scripts.data_audit import ordered_ids_sha256
     from scripts.models import build_backend
     from scripts.extraction import extract_embeddings
     from scripts.label_prior_baseline import run_label_prior_baselines
@@ -154,8 +147,10 @@ def main():
         dataset_start = perf_counter()
         print(f"Dataset: {dataset_name}")
 
-        id_col = DATASET_COL_MAP[dataset_name][ID_COL_IDX]
-        label_col = DATASET_COL_MAP[dataset_name][LABEL_COL_IDX]
+        contract = get_dataset_contract(dataset_name)
+        id_col = contract.id_column
+        label_col = contract.label_column
+        group_col = contract.group_column
 
         # Build backend
         backend = build_backend(model_id)
@@ -179,7 +174,7 @@ def main():
             id_col = id_col,
             label_col = label_col,
             manifest_dir = manifest_dir,
-            group_col = GROUP_COL_MAP[dataset_name],
+            group_col = group_col,
             max_samples = max_samples,
             sample_seed = sample_seed,
             n_splits = outer_folds,
@@ -216,7 +211,7 @@ def main():
             outer_folds = fold_assignments,
             n_splits = outer_folds,
             random_state = evaluation_seed,
-            group_col = GROUP_COL_MAP[dataset_name]
+            group_col = group_col
         )
 
         emb_array = np.asarray(embeddings)
@@ -226,8 +221,12 @@ def main():
             "normalized": normalize_embeddings,
             "n_embeddings": int(emb_array.shape[0]),
             "n_evaluated_embeddings": int(manifest_info["n_samples"]),
+            "ordered_sample_ids_sha256": ordered_ids_sha256(
+                sample_ids_from_paths(dataset_name, image_paths)
+            ),
             "source": source
         }
+        results["data_audit"] = dataloader.data_audit
         results["reproducibility"] = manifest_info
         
         results["runtime"]["stages"]["dataset_loading"] = dataset_loading_seconds

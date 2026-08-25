@@ -60,7 +60,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
     ret_results, retrieval_seconds = timed_call(
         retrieval_eval, dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col, ks = (1,5,10), per_class=True,
-        random_state = random_state
+        random_state = random_state, group_col = group_col
     )
     print(f"Completed retrieval evaluation on {dataset_name}.\n")
 
