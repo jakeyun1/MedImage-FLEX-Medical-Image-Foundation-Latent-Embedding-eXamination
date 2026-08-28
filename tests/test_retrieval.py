@@ -180,9 +180,11 @@ class RetrievalWiringTests(unittest.TestCase):
             benchmark_module.run_benchmark(
                 "ham10000", np.eye(2), pd.DataFrame(), [],
                 "image_id", "dx", group_col="lesion_id",
+                sample_ids=["a.jpg", "b.jpg"],
             )
 
         self.assertEqual(captured["group_col"], "lesion_id")
+        self.assertEqual(captured["sample_ids"], ["a.jpg", "b.jpg"])
 
 
 if __name__ == "__main__":

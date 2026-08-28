@@ -12,6 +12,7 @@ from datetime import datetime
 from time import perf_counter
 
 from scripts.dataset_contracts import get_dataset_contract
+from scripts.provenance import build_run_provenance
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
 
@@ -83,6 +84,9 @@ def main():
     datasets = cfg["dataset"]["datasets"]
     batch_size = cfg["dataset"].get("batch_size", 32)
     shuffle = cfg["dataset"].get("shuffle", False)
+    chexpert_uncertainty_policy = cfg["dataset"].get(
+        "chexpert_uncertainty_policy", "finding_specific"
+    )
 
     normalize_embeddings = cfg.get("normalize_embeddings", True)
     cache_embeddings = cfg.get("cache_embeddings", False)
@@ -112,6 +116,8 @@ def main():
     outer_folds = int(reproducibility_cfg.get("outer_folds", 5))
     manifest_dir = reproducibility_cfg.get("manifest_dir", f".{os.sep}manifests")
 
+    run_provenance = build_run_provenance(cfg, script_dir)
+
     os.makedirs(output_dir, exist_ok = True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -134,6 +140,7 @@ def main():
     from scripts.models import build_backend
     from scripts.extraction import extract_embeddings
     from scripts.label_prior_baseline import run_label_prior_baselines
+    from scripts.odir import pool_odir_patient_embeddings
     from scripts.permuted_baseline import run_permuted_baseline
     from scripts.random_baseline import run_random_baseline
     from scripts.reproducibility import prepare_experiment_manifest, sample_ids_from_paths
@@ -164,29 +171,10 @@ def main():
             transform = transform,
             batch_size = batch_size,
             shuffle = shuffle,
-            num_workers = num_workers
+            num_workers = num_workers,
+            chexpert_uncertainty_policy = chexpert_uncertainty_policy
         )
         dataset_loading_seconds = perf_counter() - load_start
-
-        metadata_df, fold_assignments, manifest_info = prepare_experiment_manifest(
-            metadata_df,
-            dataset_name = dataloader.dataset_name,
-            id_col = id_col,
-            label_col = label_col,
-            manifest_dir = manifest_dir,
-            group_col = group_col,
-            max_samples = max_samples,
-            sample_seed = sample_seed,
-            n_splits = outer_folds,
-            fold_seed = fold_seed,
-            available_sample_ids = sample_ids_from_paths(
-                dataset_name, dataloader.dataset.image_paths
-            )
-        )
-        print(
-            f"Using {len(metadata_df)} samples from reproducibility manifest: "
-            f"{manifest_info['path']}"
-        )
 
         # Extract embeddings
         embedding_start = perf_counter()
@@ -200,34 +188,88 @@ def main():
         if len(embeddings) != len(image_paths):
             raise ValueError("Embedding and image-path counts do not match.")
 
+        source_embedding_array = np.asarray(embeddings)
+        source_sample_ids = sample_ids_from_paths(dataset_name, image_paths)
+        evaluation_audit = {
+            "evaluation_unit": contract.evaluation_unit,
+            "source_image_embeddings": int(len(source_embedding_array)),
+            "evaluation_samples": int(len(source_embedding_array)),
+            "aggregation": "none",
+        }
+        evaluation_embeddings = source_embedding_array
+        evaluation_metadata = metadata_df
+        evaluation_paths = image_paths
+        evaluation_sample_ids = source_sample_ids
+        if dataset_name == "odir":
+            (
+                evaluation_embeddings,
+                evaluation_metadata,
+                evaluation_sample_ids,
+                evaluation_audit,
+            ) = pool_odir_patient_embeddings(
+                source_embedding_array,
+                metadata_df,
+                image_paths,
+                normalize=normalize_embeddings,
+            )
+            # Evaluation functions use explicit sample IDs; these references are
+            # never opened as files.
+            evaluation_paths = list(evaluation_sample_ids)
+
+        evaluation_metadata, fold_assignments, manifest_info = (
+            prepare_experiment_manifest(
+                evaluation_metadata,
+                dataset_name=dataloader.dataset_name,
+                id_col=id_col,
+                label_col=label_col,
+                manifest_dir=manifest_dir,
+                group_col=group_col,
+                max_samples=max_samples,
+                sample_seed=sample_seed,
+                n_splits=outer_folds,
+                fold_seed=fold_seed,
+                available_sample_ids=evaluation_sample_ids,
+            )
+        )
+        print(
+            f"Using {len(evaluation_metadata)} samples from reproducibility manifest: "
+            f"{manifest_info['path']}"
+        )
+
         # Run benchmark suite
         results = run_benchmark(
             dataset_name,
-            embeddings,
-            metadata_df,
-            image_paths,
+            evaluation_embeddings,
+            evaluation_metadata,
+            evaluation_paths,
             id_col = id_col,
             label_col = label_col,
             outer_folds = fold_assignments,
             n_splits = outer_folds,
             random_state = evaluation_seed,
-            group_col = group_col
+            group_col = group_col,
+            sample_ids = evaluation_sample_ids
         )
 
-        emb_array = np.asarray(embeddings)
+        emb_array = np.asarray(evaluation_embeddings)
         results["embedding_info"] = {
             "model_id": model_id,
             "embedding_dim": int(emb_array.shape[1]),
             "normalized": normalize_embeddings,
-            "n_embeddings": int(emb_array.shape[0]),
+            "n_source_image_embeddings": int(source_embedding_array.shape[0]),
+            "n_evaluation_embeddings": int(emb_array.shape[0]),
             "n_evaluated_embeddings": int(manifest_info["n_samples"]),
-            "ordered_sample_ids_sha256": ordered_ids_sha256(
-                sample_ids_from_paths(dataset_name, image_paths)
+            "ordered_source_image_ids_sha256": ordered_ids_sha256(source_sample_ids),
+            "ordered_evaluation_ids_sha256": ordered_ids_sha256(
+                evaluation_sample_ids
             ),
+            "evaluation_unit": contract.evaluation_unit,
             "source": source
         }
         results["data_audit"] = dataloader.data_audit
+        results["data_audit"]["evaluation"] = evaluation_audit
         results["reproducibility"] = manifest_info
+        results["run_provenance"] = run_provenance
         
         results["runtime"]["stages"]["dataset_loading"] = dataset_loading_seconds
         results["runtime"]["stages"]["embedding_extraction"] = embedding_seconds
@@ -241,8 +283,8 @@ def main():
             run_random_baseline(
                 dataset_name,
                 embedding_shape = emb_array.shape,
-                metadata_df = metadata_df,
-                image_paths = image_paths,
+                metadata_df = evaluation_metadata,
+                image_paths = evaluation_paths,
                 id_col = id_col,
                 label_col = label_col,
                 output_dir = os.path.join(run_folder, "random_baseline"),
@@ -255,13 +297,14 @@ def main():
                 n_splits = outer_folds,
                 evaluation_seed = evaluation_seed,
                 manifest_info = manifest_info,
-                group_col = GROUP_COL_MAP[dataset_name]
+                group_col = group_col,
+                sample_ids = evaluation_sample_ids
             )
 
         if run_label_prior:
             run_label_prior_baselines(
                 dataset_name,
-                metadata_df = metadata_df,
+                metadata_df = evaluation_metadata,
                 id_col = id_col,
                 label_col = label_col,
                 output_dir = os.path.join(run_folder, "label_prior_baseline"),
@@ -275,8 +318,8 @@ def main():
             run_permuted_baseline(
                 dataset_name,
                 embeddings = emb_array,
-                metadata_df = metadata_df,
-                image_paths = image_paths,
+                metadata_df = evaluation_metadata,
+                image_paths = evaluation_paths,
                 id_col = id_col,
                 label_col = label_col,
                 output_dir = os.path.join(run_folder, "permuted_baseline"),
@@ -288,7 +331,8 @@ def main():
                 n_splits = outer_folds,
                 evaluation_seed = evaluation_seed,
                 manifest_info = manifest_info,
-                group_col = GROUP_COL_MAP[dataset_name]
+                group_col = group_col,
+                sample_ids = evaluation_sample_ids
             )
 
         print(f"\n=== Dataset Complete ===\n\n")

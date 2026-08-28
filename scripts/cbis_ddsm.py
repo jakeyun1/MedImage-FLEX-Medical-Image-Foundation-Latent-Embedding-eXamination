@@ -160,6 +160,13 @@ def prepare_cbis_ddsm_full_mammograms(metadata_df, image_paths):
     label_counts = Counter(label for labels in result["pathology"] for label in labels)
     audit = {
         "protocol": "cbis_ddsm_full_mammogram_multilabel_v1",
+        "sample_unit": "full_mammogram",
+        "representation": "third_party_jpeg_derivative",
+        "source_dataset": "CBIS-DDSM",
+        "source_repository": "The Cancer Imaging Archive",
+        "source_url": "https://www.cancerimagingarchive.net/collection/cbis-ddsm/",
+        "source_partition_policy": "pooled_for_patient_grouped_cross_validation",
+        "population_scope": "abnormality_enriched_not_screening_prevalence",
         "source_abnormality_rows": int(len(prepared)),
         "source_full_mammogram_paths": int(prepared["_sample_id"].nunique()),
         "canonical_scans": int(len(result)),

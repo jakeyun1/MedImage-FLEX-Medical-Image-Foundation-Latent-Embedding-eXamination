@@ -22,6 +22,17 @@ class DatasetContractTests(unittest.TestCase):
                 self.assertTrue(contract.label_column)
                 self.assertTrue(contract.group_column)
                 self.assertTrue(contract.required_source_columns)
+                self.assertIn("/versions/", contract.dataset_handle)
+                self.assertTrue(contract.evaluation_unit)
+
+    def test_odir_uses_original_patient_multilabel_contract(self):
+        odir = get_dataset_contract("odir")
+        self.assertEqual(odir.metadata_filenames, ("data.xlsx",))
+        self.assertEqual(odir.label_type, "multilabel")
+        self.assertEqual(odir.id_column, "ID")
+        self.assertEqual(odir.load_id_column, "filename")
+        self.assertEqual(odir.evaluation_unit, "patient")
+        self.assertEqual(odir.label_names, ("N", "D", "G", "C", "A", "H", "M", "O"))
 
     def test_sample_ids_are_platform_independent(self):
         chexpert = get_dataset_contract("chexpert")

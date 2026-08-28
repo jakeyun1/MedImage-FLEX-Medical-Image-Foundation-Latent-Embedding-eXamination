@@ -7,3 +7,5 @@ manifests/
 configs/
 scripts/__pycache__/
 *.sh
+output/
+tmp/

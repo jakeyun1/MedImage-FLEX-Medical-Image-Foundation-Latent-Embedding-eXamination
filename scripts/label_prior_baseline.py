@@ -8,7 +8,13 @@ import json
 import os
 
 import numpy as np
-from sklearn.metrics import accuracy_score, f1_score, precision_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    precision_score,
+    roc_auc_score,
+)
 
 from scripts.tests import (
     _dataset_info,
@@ -20,7 +26,9 @@ from scripts.tests import (
 
 def _score_predictions(y_true, y_pred, scores, is_multilabel):
     result = {
-        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f1_macro": float(
+            f1_score(y_true, y_pred, average="macro", zero_division=0)
+        ),
         "f1_weighted": float(
             f1_score(y_true, y_pred, average="weighted", zero_division=0)
         ),
@@ -28,6 +36,13 @@ def _score_predictions(y_true, y_pred, scores, is_multilabel):
             precision_score(y_true, y_pred, average="weighted", zero_division=0)
         ),
     }
+    if is_multilabel:
+        result["exact_match_accuracy"] = float(accuracy_score(y_true, y_pred))
+    else:
+        result["accuracy"] = float(accuracy_score(y_true, y_pred))
+        result["balanced_accuracy"] = float(
+            balanced_accuracy_score(y_true, y_pred)
+        )
 
     try:
         if is_multilabel:
@@ -47,7 +62,9 @@ def _score_predictions(y_true, y_pred, scores, is_multilabel):
 
 def _summarize_fold_scores(fold_scores):
     summary = {}
-    for metric in ("accuracy", "f1_weighted", "precision_weighted", "roc_auc"):
+    ignored = {"fold", "training_label_priors"}
+    metrics = sorted(set().union(*(fold.keys() for fold in fold_scores)) - ignored)
+    for metric in metrics:
         values = [fold[metric] for fold in fold_scores if fold[metric] is not None]
         summary[metric] = [
             float(np.mean(values)) if values else None,

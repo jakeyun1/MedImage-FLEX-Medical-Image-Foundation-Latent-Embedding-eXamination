@@ -64,6 +64,11 @@ class CbisDdsmPreparationTests(unittest.TestCase):
         self.assertEqual(result.loc[0, "source_partitions"], ["Test", "Training"])
         self.assertEqual(audit["duplicate_image_aliases_collapsed"], 1)
         self.assertEqual(audit["benign_without_callback_rows_collapsed"], 1)
+        self.assertEqual(audit["representation"], "third_party_jpeg_derivative")
+        self.assertEqual(
+            audit["source_partition_policy"],
+            "pooled_for_patient_grouped_cross_validation",
+        )
         self.assertTrue(set(result.loc[0, "pathology"]).issubset(CBIS_LABELS))
 
     def test_rejects_different_image_contents_for_one_scan(self):

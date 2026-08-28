@@ -57,7 +57,7 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertEqual(info["sample_target_deviation"], len(selected) - 12)
         self.assertEqual(info["n_eligible_samples"], len(self.metadata))
         self.assertEqual(info["n_eligible_groups"], source_sizes.size)
-        self.assertIn("_v3_", os.path.basename(info["path"]))
+        self.assertIn("_v4_", os.path.basename(info["path"]))
 
         group_folds = pd.DataFrame({
             "group": selected["patient_id"],

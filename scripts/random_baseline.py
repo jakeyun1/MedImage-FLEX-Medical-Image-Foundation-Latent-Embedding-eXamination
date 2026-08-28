@@ -15,14 +15,23 @@ from scripts.reproducibility import sample_ids_from_paths
 
 HEADLINE_METRICS = (
     ("mlp_cv", "accuracy"),
+    ("mlp_cv", "exact_match_accuracy"),
+    ("mlp_cv", "balanced_accuracy"),
+    ("mlp_cv", "f1_macro"),
     ("mlp_cv", "f1_weighted"),
     ("mlp_cv", "precision_weighted"),
     ("mlp_cv", "roc_auc"),
-    ("knn_cv", "best_scores", "accuracy"),
-    ("knn_cv", "best_scores", "f1_weighted"),
-    ("knn_cv", "best_scores", "precision_weighted"),
-    ("knn_cv", "best_scores", "roc_auc"),
+    ("knn_cv", "accuracy"),
+    ("knn_cv", "exact_match_accuracy"),
+    ("knn_cv", "balanced_accuracy"),
+    ("knn_cv", "f1_macro"),
+    ("knn_cv", "f1_weighted"),
+    ("knn_cv", "precision_weighted"),
+    ("knn_cv", "roc_auc"),
     ("logreg_cv", "accuracy"),
+    ("logreg_cv", "exact_match_accuracy"),
+    ("logreg_cv", "balanced_accuracy"),
+    ("logreg_cv", "f1_macro"),
     ("logreg_cv", "f1_weighted"),
     ("logreg_cv", "precision_weighted"),
     ("logreg_cv", "roc_auc"),
@@ -63,6 +72,8 @@ def _read_metric(result, path):
     for key in path:
         if isinstance(value, dict) and key not in value and key.isdigit():
             key = int(key)
+        if not isinstance(value, dict) or key not in value:
+            return None
         value = value[key]
 
     # Classification summaries store [outer-fold mean, outer-fold std].
@@ -76,7 +87,10 @@ def aggregate_benchmark_results(results, seeds):
     metrics = {}
 
     for path in HEADLINE_METRICS:
-        values = np.asarray([_read_metric(result, path) for result in results], dtype=float)
+        values = np.asarray([
+            np.nan if (value := _read_metric(result, path)) is None else value
+            for result in results
+        ], dtype=float)
         finite_values = values[np.isfinite(values)]
         metric_name = ".".join(path)
 
@@ -109,6 +123,11 @@ def aggregate_benchmark_results(results, seeds):
 
 
 def _validate_cached_result(result, expected, manifest_info):
+    if result.get("result_schema_version") != 2:
+        raise ValueError(
+            "Cached random baseline uses an incompatible result schema; "
+            "rerun it with overwrite enabled."
+        )
     info = result.get("baseline_info", {})
     for key, value in expected.items():
         if info.get(key) != value:
@@ -141,6 +160,7 @@ def run_random_baseline(
     evaluation_seed=42,
     manifest_info=None,
     group_col=None,
+    sample_ids=None,
     benchmark_fn=None,
 ):
     """
@@ -154,7 +174,10 @@ def run_random_baseline(
     if outer_folds is None:
         raise ValueError("A stored outer-fold manifest is required.")
 
-    image_sample_ids = sample_ids_from_paths(dataset_name, image_paths)
+    image_sample_ids = (
+        sample_ids_from_paths(dataset_name, image_paths)
+        if sample_ids is None else [str(sample_id) for sample_id in sample_ids]
+    )
     if len(image_sample_ids) != embedding_shape[0]:
         raise ValueError("Embedding and image-path counts do not match.")
     if len(set(image_sample_ids)) != len(image_sample_ids):
@@ -219,6 +242,7 @@ def run_random_baseline(
         }
         if group_col is not None:
             benchmark_kwargs["group_col"] = group_col
+        benchmark_kwargs["sample_ids"] = list(outer_folds)
         result = benchmark_fn(
             dataset_name, embeddings, metadata_df, cohort_paths, **benchmark_kwargs
         )

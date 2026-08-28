@@ -25,7 +25,7 @@ METRICS_MAP = {"Retrieval": ["recall@5", "map"],
 
 def compute_classification_averages(json_list):
     """
-    Calculates the average F1 and mAUC scores across the used 
+    Calculates the average macro F1 and mAUC scores across the used
     datasets amongst the MLP, KNN, and LR adapters.
 
     Sample output:
@@ -68,18 +68,22 @@ def compute_classification_averages(json_list):
     for file in json_list:
         with open(file, "r") as f:
             dataset_results = json.load(f)
+        if dataset_results.get("result_schema_version") != 2:
+            raise ValueError(
+                f"{file} uses an incompatible result schema; regenerate its results."
+            )
         
         # WARNING: accumulator indices are hardcoded due to dataset results JSON structure
         # MLP
-        f1_accumulator[0].append(dataset_results["mlp_cv"]["f1_weighted"][0])
+        f1_accumulator[0].append(dataset_results["mlp_cv"]["f1_macro"][0])
         mauc_accumulator[0].append(dataset_results["mlp_cv"]["roc_auc"][0])
 
         # KNN
-        f1_accumulator[1].append(dataset_results["knn_cv"]["best_scores"]["f1_weighted"])
-        mauc_accumulator[1].append(dataset_results["knn_cv"]["best_scores"]["roc_auc"][0])
+        f1_accumulator[1].append(dataset_results["knn_cv"]["f1_macro"][0])
+        mauc_accumulator[1].append(dataset_results["knn_cv"]["roc_auc"][0])
 
         # LR
-        f1_accumulator[2].append(dataset_results["logreg_cv"]["f1_weighted"][0])
+        f1_accumulator[2].append(dataset_results["logreg_cv"]["f1_macro"][0])
         mauc_accumulator[2].append(dataset_results["logreg_cv"]["roc_auc"][0])
 
     # Compute averages and std devs

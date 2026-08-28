@@ -21,6 +21,10 @@ class DatasetContract:
     required_source_columns: Tuple[str, ...]
     sample_id_path_parts: int = 1
     image_directory_names: Tuple[str, ...] = ()
+    image_id_column: str = ""
+    label_names: Tuple[str, ...] = ()
+    evaluation_unit: str = "image"
+    exclusion_policy_filename: str = ""
 
     def __post_init__(self):
         if self.label_type not in {"multiclass", "multilabel"}:
@@ -29,6 +33,15 @@ class DatasetContract:
             raise ValueError("sample_id_path_parts must be at least 1.")
         if not self.metadata_filenames:
             raise ValueError("At least one metadata filename is required.")
+        if self.label_type == "multilabel" and not self.label_names:
+            raise ValueError("Multilabel datasets must declare label names.")
+        if not self.evaluation_unit:
+            raise ValueError("An evaluation unit is required.")
+
+    @property
+    def load_id_column(self) -> str:
+        """ID used for the one-to-one metadata-to-image loading audit."""
+        return self.image_id_column or self.id_column
 
     def sample_id_from_path(self, path) -> str:
         """Return a platform-independent sample ID from a local image path."""
@@ -58,22 +71,30 @@ class DatasetContract:
 DATASET_CONTRACTS: Dict[str, DatasetContract] = {
     "pad_ufes": DatasetContract(
         name="pad_ufes",
-        dataset_handle="mahdavi1202/skin-cancer",
+        dataset_handle="mahdavi1202/skin-cancer/versions/1",
         metadata_filenames=("metadata.csv",),
         id_column="img_id",
         label_column="diagnostic",
         group_column="patient_id",
         label_type="multiclass",
         required_source_columns=("img_id", "diagnostic", "patient_id"),
+        exclusion_policy_filename="pad_ufes_exclusions.csv",
     ),
     "chexpert": DatasetContract(
         name="chexpert",
-        dataset_handle="ashery/chexpert",
+        dataset_handle="ashery/chexpert/versions/1",
         metadata_filenames=("train.csv",),
         id_column="Path",
         label_column="Diagnosis",
         group_column="patient_id",
         label_type="multilabel",
+        label_names=(
+            "Cardiomegaly",
+            "Pleural Effusion",
+            "Edema",
+            "Consolidation",
+            "Atelectasis",
+        ),
         required_source_columns=(
             "Path",
             "Cardiomegaly",
@@ -81,13 +102,18 @@ DATASET_CONTRACTS: Dict[str, DatasetContract] = {
             "Edema",
             "Consolidation",
             "Atelectasis",
+            "Frontal/Lateral",
         ),
         sample_id_path_parts=3,
         image_directory_names=("train",),
+        evaluation_unit="radiograph",
+        exclusion_policy_filename="chexpert_exclusions.csv",
     ),
     "cbis_ddsm": DatasetContract(
         name="cbis_ddsm",
-        dataset_handle="debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm",
+        dataset_handle=(
+            "debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm/versions/1"
+        ),
         metadata_filenames=(
             "calc_case(with_jpg_img).csv",
             "mass_case(with_jpg_img).csv",
@@ -96,6 +122,12 @@ DATASET_CONTRACTS: Dict[str, DatasetContract] = {
         label_column="pathology",
         group_column="patient_id",
         label_type="multilabel",
+        label_names=(
+            "mass_BENIGN",
+            "mass_MALIGNANT",
+            "calcification_BENIGN",
+            "calcification_MALIGNANT",
+        ),
         required_source_columns=(
             "abnormality type",
             "pathology",
@@ -105,21 +137,41 @@ DATASET_CONTRACTS: Dict[str, DatasetContract] = {
             "image view",
         ),
         sample_id_path_parts=2,
+        evaluation_unit="full_mammogram",
     ),
     "odir": DatasetContract(
         name="odir",
-        dataset_handle="andrewmvd/ocular-disease-recognition-odir5k",
-        metadata_filenames=("full_df.csv",),
-        id_column="filename",
-        label_column="target",
+        dataset_handle="andrewmvd/ocular-disease-recognition-odir5k/versions/2",
+        metadata_filenames=("data.xlsx",),
+        id_column="ID",
+        image_id_column="filename",
+        label_column="Diagnosis",
         group_column="ID",
-        label_type="multiclass",
-        required_source_columns=("filename", "target", "ID"),
+        label_type="multilabel",
+        label_names=("N", "D", "G", "C", "A", "H", "M", "O"),
+        required_source_columns=(
+            "ID",
+            "Patient Age",
+            "Patient Sex",
+            "Left-Fundus",
+            "Right-Fundus",
+            "Left-Diagnostic Keywords",
+            "Right-Diagnostic Keywords",
+            "N",
+            "D",
+            "G",
+            "C",
+            "A",
+            "H",
+            "M",
+            "O",
+        ),
         image_directory_names=("Training Images",),
+        evaluation_unit="patient",
     ),
     "ham10000": DatasetContract(
         name="ham10000",
-        dataset_handle="kmader/skin-cancer-mnist-ham10000",
+        dataset_handle="kmader/skin-cancer-mnist-ham10000/versions/2",
         metadata_filenames=("HAM10000_metadata.csv",),
         id_column="image_id",
         label_column="dx",
@@ -130,6 +182,7 @@ DATASET_CONTRACTS: Dict[str, DatasetContract] = {
             "ham10000_images_part_1",
             "ham10000_images_part_2",
         ),
+        exclusion_policy_filename="ham10000_exclusions.csv",
     ),
 }
 

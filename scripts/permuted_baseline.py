@@ -42,6 +42,11 @@ def generate_permuted_embeddings(embeddings, seed, row_indices=None):
 
 
 def _validate_cached_result(result, expected, manifest_info):
+    if result.get("result_schema_version") != 2:
+        raise ValueError(
+            "Cached permuted baseline uses an incompatible result schema; "
+            "rerun it with overwrite enabled."
+        )
     info = result.get("baseline_info", {})
     for key, value in expected.items():
         if info.get(key) != value:
@@ -73,6 +78,7 @@ def run_permuted_baseline(
     evaluation_seed=42,
     manifest_info=None,
     group_col=None,
+    sample_ids=None,
     benchmark_fn=None,
 ):
     """
@@ -87,7 +93,10 @@ def run_permuted_baseline(
     if outer_folds is None:
         raise ValueError("A stored outer-fold manifest is required.")
 
-    image_sample_ids = sample_ids_from_paths(dataset_name, image_paths)
+    image_sample_ids = (
+        sample_ids_from_paths(dataset_name, image_paths)
+        if sample_ids is None else [str(sample_id) for sample_id in sample_ids]
+    )
     if len(image_sample_ids) != len(embedding_array):
         raise ValueError("Embedding and image-path counts do not match.")
     if len(set(image_sample_ids)) != len(image_sample_ids):
@@ -149,6 +158,7 @@ def run_permuted_baseline(
         }
         if group_col is not None:
             benchmark_kwargs["group_col"] = group_col
+        benchmark_kwargs["sample_ids"] = image_sample_ids
         result = benchmark_fn(
             dataset_name, permuted_embeddings, metadata_df, image_paths,
             **benchmark_kwargs

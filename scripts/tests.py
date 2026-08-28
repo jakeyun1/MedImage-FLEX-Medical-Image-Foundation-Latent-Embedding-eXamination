@@ -4,12 +4,18 @@ tests.py
 This file contains the functions for testing the quality of the embeddings.
 """
 
-import os
 import numpy as np
 import pandas as pd
 import optuna
 from sklearn.preprocessing import LabelEncoder, StandardScaler, Normalizer, MultiLabelBinarizer
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, precision_recall_fscore_support
+from sklearn.metrics import (
+    accuracy_score,
+    balanced_accuracy_score,
+    f1_score,
+    roc_auc_score,
+    precision_score,
+    precision_recall_fscore_support,
+)
 from sklearn.neural_network import MLPClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.model_selection import (
@@ -25,14 +31,17 @@ from collections import Counter
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
 
-from scripts.cbis_ddsm import CBIS_LABELS
+from scripts.dataset_contracts import DATASET_CONTRACTS, get_dataset_contract
 
 # Silence Optuna's extensive logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+CLASSIFICATION_TUNING_METRIC = "f1_macro"
+
 MULTILABEL_CLASS_NAMES = {
-    "chexpert": ["Cardiomegaly", "Pleural Effusion", "Edema", "Consolidation", "Atelectasis"],
-    "cbis_ddsm": list(CBIS_LABELS)
+    name: list(contract.label_names)
+    for name, contract in DATASET_CONTRACTS.items()
+    if contract.label_type == "multilabel"
 }
 
 def encode_labels(labels, dataset_name = None):
@@ -76,8 +85,21 @@ def encode_labels(labels, dataset_name = None):
 
     return y, classes, False
 
+def _embedding_sample_ids(dataset_name, image_paths, sample_ids=None):
+    if sample_ids is None:
+        contract = get_dataset_contract(dataset_name)
+        sample_ids = [contract.sample_id_from_path(path) for path in image_paths]
+    else:
+        sample_ids = [str(sample_id) for sample_id in sample_ids]
+    if len(sample_ids) != len(image_paths):
+        raise ValueError("Sample IDs and sample references have different lengths.")
+    if len(set(sample_ids)) != len(sample_ids):
+        raise ValueError("Embedding sample IDs must be unique.")
+    return sample_ids
+
+
 def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-                            return_sample_ids = False):
+                            return_sample_ids = False, sample_ids = None):
     """
     Prepares the data for adapters. Allows for multilabel data to be labeled appropriately.
     Embeddings are ordered to be "paired" up with their associated image and target.
@@ -98,15 +120,10 @@ def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, 
         classes : The target classes in the dataset
         is_multilabel : Boolean flag for multilabel data
     """
-    # Prepare image column for embedding DataFrame
-    if dataset_name == "chexpert":
-        image_names = [os.sep.join(path.split(os.sep)[-3:]) for path in image_paths]
-    elif dataset_name == "cbis_ddsm":
-        image_names = ["/".join(path.split(os.sep)[-2:]) for path in image_paths]
-    else:
-        image_names = [os.path.basename(path) for path in image_paths]
-
     emb = np.asarray(embeddings, dtype = np.float32)
+    image_names = _embedding_sample_ids(dataset_name, image_paths, sample_ids)
+    if emb.ndim != 2 or len(emb) != len(image_names):
+        raise ValueError("Embedding rows must match the explicit sample IDs.")
     emb_df = pd.DataFrame(emb)
     emb_df[id_col] = np.asarray(image_names)
 
@@ -127,7 +144,8 @@ def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, 
 
     return X, y, classes, is_multilabel
 
-def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col):
+def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+                            sample_ids = None):
     """
     Prepares the data for adapters. Treats multilabel data as multiclass data.
     Embeddings are ordered to be "paired" up with their associated image and target.
@@ -147,15 +165,10 @@ def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, 
         y : The target diagnosis(es)
         classes : The target classes in the dataset
     """
-    # Prepare image column for embedding DataFrame
-    if dataset_name == "chexpert":
-        image_names = [os.sep.join(path.split(os.sep)[-3:]) for path in image_paths]
-    elif dataset_name == "cbis_ddsm":
-        image_names = ["/".join(path.split(os.sep)[-2:]) for path in image_paths]
-    else:
-        image_names = [os.path.basename(path) for path in image_paths]
-
     emb = np.asarray(embeddings, dtype = np.float32)
+    image_names = _embedding_sample_ids(dataset_name, image_paths, sample_ids)
+    if emb.ndim != 2 or len(emb) != len(image_names):
+        raise ValueError("Embedding rows must match the explicit sample IDs.")
     emb_df = pd.DataFrame(emb)
     emb_df[id_col] = np.asarray(image_names)
 
@@ -263,6 +276,10 @@ def _split_iter(cv, X, y, is_multilabel):
 def _outer_split_iter(X, y, is_multilabel, n_splits, random_state,
                       sample_ids, outer_folds, group_ids=None):
     if outer_folds is None:
+        if group_ids is not None:
+            raise ValueError(
+                "A stored outer-fold manifest is required for grouped evaluation."
+            )
         cv = _cv_splitter(is_multilabel, n_splits, random_state)
         return _split_iter(cv, X, y, is_multilabel)
 
@@ -299,6 +316,7 @@ def _extract_positive_proba(proba):
     return proba
 
 def _dataset_info(dataset_name, y, classes, label_type):
+    contract = get_dataset_contract(dataset_name)
     if label_type == "multilabel":
         counts = np.asarray(y).sum(axis = 0)
     else:
@@ -310,7 +328,11 @@ def _dataset_info(dataset_name, y, classes, label_type):
         "n_classes": int(len(classes)),
         "classes": [str(cls) for cls in classes],
         "class_counts": {str(cls): int(counts[idx]) for idx, cls in enumerate(classes)},
-        "label_type": label_type
+        "label_type": label_type,
+        "evaluation_unit": contract.evaluation_unit,
+        "accuracy_metric": (
+            "exact_match_accuracy" if label_type == "multilabel" else "accuracy"
+        ),
     }
 
 def _per_class_metrics(y_true, y_pred, classes, is_multilabel):
@@ -341,10 +363,15 @@ def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None):
         y_pred = pipe.predict(X_test)
 
     scores = {
-        "accuracy": accuracy_score(y_test, y_pred),
+        "f1_macro": f1_score(y_test, y_pred, average = "macro", zero_division = 0),
         "f1_weighted": f1_score(y_test, y_pred, average = "weighted", zero_division = 0),
         "precision_weighted": precision_score(y_test, y_pred, average = "weighted", zero_division = 0),
     }
+    if is_multilabel:
+        scores["exact_match_accuracy"] = accuracy_score(y_test, y_pred)
+    else:
+        scores["accuracy"] = accuracy_score(y_test, y_pred)
+        scores["balanced_accuracy"] = balanced_accuracy_score(y_test, y_pred)
 
     proba = _extract_positive_proba(pipe.predict_proba(X_test))
 
@@ -364,6 +391,25 @@ def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None):
 
     return scores
 
+
+def _classification_metric_names(is_multilabel):
+    if is_multilabel:
+        return (
+            "exact_match_accuracy",
+            "f1_macro",
+            "f1_weighted",
+            "precision_weighted",
+            "roc_auc",
+        )
+    return (
+        "accuracy",
+        "balanced_accuracy",
+        "f1_macro",
+        "f1_weighted",
+        "precision_weighted",
+        "roc_auc",
+    )
+
 def _fold_summary(fold_idx, scores):
     fold_result = {"fold": int(fold_idx)}
     fold_result.update({metric: float(score) for metric, score in scores.items()})
@@ -382,7 +428,7 @@ def _most_common_params(params_by_fold):
 
 def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
            label_col, n_splits = 5, random_state = 42, n_trials = 20,
-           outer_folds = None, group_col = None):
+           outer_folds = None, group_col = None, sample_ids = None):
     """
     Tests the embeddings on an MLP adapter.
 
@@ -402,7 +448,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     """
     X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
         dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-        return_sample_ids = True
+        return_sample_ids = True, sample_ids = sample_ids
     )
     group_ids = _group_ids_for_samples(
         metadata_df, id_col, group_col, sample_ids
@@ -412,8 +458,6 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
-    scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
-
     print(f"--- Optimizing MLP with Optuna ({n_trials} trials) ---")
 
     def build_pipe(params, max_iter):
@@ -432,7 +476,8 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
 
         return Pipeline([("scaler", StandardScaler()), ("mlp", clf)])
 
-    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    metric_names = _classification_metric_names(is_multilabel)
+    fold_scores = {metric: [] for metric in metric_names}
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
@@ -465,7 +510,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
             scores = cross_val_score(
                 pipeline, X_train, y_train,
                 cv = inner_cv,
-                scoring = scoring_auc,
+                scoring = CLASSIFICATION_TUNING_METRIC,
                 n_jobs = -1
             )
             return scores.mean()
@@ -516,7 +561,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
             "stratified_group_kfold" if group_col is not None else "sample_level"
         ),
         "inner_fold_unit": group_col if group_col is not None else "sample_id",
-        "tuning_metric": scoring_auc,
+        "tuning_metric": CLASSIFICATION_TUNING_METRIC,
         "n_trials": int(n_trials)
     }
 
@@ -528,7 +573,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     )
 
     print(f"Nested CV {n_splits}-fold results (mean ± std):")
-    for k in ["accuracy", "f1_weighted", "precision_weighted", "roc_auc"]:
+    for k in metric_names:
         m, s = summary[k]
         print(f"  {k:18s}: {m:.4f} ± {s:.4f}")
 
@@ -536,7 +581,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
 
 def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
            n_splits = 5, random_state = 42, n_trials = 15, outer_folds = None,
-           group_col = None):
+           group_col = None, sample_ids = None):
     """
     Tests the embeddings on a KNN adapter.
 
@@ -556,7 +601,7 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     """
     X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
         dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-        return_sample_ids = True
+        return_sample_ids = True, sample_ids = sample_ids
     )
     group_ids = _group_ids_for_samples(
         metadata_df, id_col, group_col, sample_ids
@@ -577,7 +622,8 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
-    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    metric_names = _classification_metric_names(is_multilabel)
+    fold_scores = {metric: [] for metric in metric_names}
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
@@ -604,11 +650,11 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
                 "metric": trial.suggest_categorical("metric", ["euclidean", "cosine", "manhattan"])
             }
 
-            # Use F1 weighted for tuning KNN (handling class imbalance better than accuracy)
+            # Macro F1 prevents majority findings/classes from dominating selection.
             score = cross_val_score(
                 build_pipe(params), X_train, y_train,
                 cv = inner_cv,
-                scoring = "f1_weighted",
+                scoring = CLASSIFICATION_TUNING_METRIC,
                 n_jobs = -1
             ).mean()
             return score
@@ -639,15 +685,9 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
     score_summary = _summarize_fold_scores(fold_scores)
     best_params = _most_common_params(best_params_by_fold)
 
-    # JSON compatible
-    summary = {
+    summary = dict(score_summary)
+    summary.update({
         "best_k": best_params["n_neighbors"],
-        "best_scores": {
-            "accuracy": score_summary["accuracy"][0],
-            "f1_weighted": score_summary["f1_weighted"][0],
-            "precision_weighted": score_summary["precision_weighted"],
-            "roc_auc": score_summary["roc_auc"]
-        },
         "classes": classes,
         "best_params": best_params,
         "best_params_by_fold": best_params_by_fold,
@@ -670,23 +710,21 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
                 "stratified_group_kfold" if group_col is not None else "sample_level"
             ),
             "inner_fold_unit": group_col if group_col is not None else "sample_id",
-            "tuning_metric": "f1_weighted",
+            "tuning_metric": CLASSIFICATION_TUNING_METRIC,
             "n_trials": int(n_trials)
-        }
-    }
+        },
+    })
 
     print(f"KNN nested CV (n_splits={n_splits}) — most common best k = {summary['best_k']}")
-    for k, v in summary["best_scores"].items():
-        if isinstance(v, list):
-            continue
-        else:
-            print(f"  {k:18s}: {v:.4f}")
+    for metric in metric_names:
+        mean, std = summary[metric]
+        print(f"  {metric:18s}: {mean:.4f} ± {std:.4f}")
 
     return summary
 
 def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                            n_splits = 5, random_state = 42, n_trials = 15,
-                           outer_folds = None, group_col = None):
+                           outer_folds = None, group_col = None, sample_ids = None):
     """
     Tests the embeddings on a LR adapter.
 
@@ -706,7 +744,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     """
     X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
         dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-        return_sample_ids = True
+        return_sample_ids = True, sample_ids = sample_ids
     )
     group_ids = _group_ids_for_samples(
         metadata_df, id_col, group_col, sample_ids
@@ -716,8 +754,6 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
-    scoring_auc = "roc_auc" if is_multilabel or len(classes) == 2 else "roc_auc_ovr"
-
     print(f"--- Optimizing Logistic Regression with Optuna ({n_trials} trials) ---")
 
     def build_pipe(params, n_rows, max_iter):
@@ -741,7 +777,8 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
 
         return Pipeline([("std", StandardScaler()), ("clf", clf)])
 
-    fold_scores = {"accuracy": [], "f1_weighted": [], "precision_weighted": [], "roc_auc": []}
+    metric_names = _classification_metric_names(is_multilabel)
+    fold_scores = {metric: [] for metric in metric_names}
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
@@ -770,7 +807,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
                 X_train,
                 y_train,
                 cv = inner_cv,
-                scoring = scoring_auc,
+                scoring = CLASSIFICATION_TUNING_METRIC,
                 n_jobs = -1
             ).mean()
 
@@ -820,13 +857,13 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
             "stratified_group_kfold" if group_col is not None else "sample_level"
         ),
         "inner_fold_unit": group_col if group_col is not None else "sample_id",
-        "tuning_metric": scoring_auc,
+        "tuning_metric": CLASSIFICATION_TUNING_METRIC,
         "n_trials": int(n_trials)
     }
 
     # Print out the results
     print(f"Logistic Regression Nested CV Results (n_splits={n_splits}):")
-    for metric in ["accuracy", "f1_weighted", "precision_weighted", "roc_auc"]:
+    for metric in metric_names:
         mean, std = summary[metric]
         print(f"  {metric:18s}: {mean:.4f} ± {std:.4f}")
 
@@ -835,7 +872,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
 def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                    ks = (1, 5, 10), normalize = True, per_class = False,
                    bootstrap = True, n_bootstrap = 1000, ci = 95, random_state = 42,
-                   group_col = None):
+                   group_col = None, sample_ids = None):
     """
     Cross-group retrieval using exact-class or per-finding relevance.
 
@@ -864,7 +901,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     """
     X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
         dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-        return_sample_ids = True
+        return_sample_ids = True, sample_ids = sample_ids
     )
     group_ids = _group_ids_for_samples(
         metadata_df, id_col, group_col, sample_ids
@@ -1143,7 +1180,8 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     return results
 
 def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-                    k_range = range(2, 15), random_state = 42, compute_silhouette = True):
+                    k_range = range(2, 15), random_state = 42,
+                    compute_silhouette = True, sample_ids = None):
     """
     Run KMeans for multiple numbers of clusters (k_range) and compute ARI/NMI (and silhouette if requested).
 
@@ -1164,7 +1202,7 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         results_dict : JSON-compatible summary of the clustering test
     """
     X, y, classes = prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths,
-            id_col, label_col)
+            id_col, label_col, sample_ids = sample_ids)
 
     class_count_k = len(classes)
     eval_k_values = sorted(set(k_range) | {class_count_k})
@@ -1234,7 +1272,7 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         results_dict["best_silhouette"] = [int(best_k_sil['k']), float(best_k_sil['Silhouette'])]
         results_dict["silhouette_selected_k"] = row_summary(best_k_sil)
 
-    if dataset_name in ("cbis_ddsm", "odir"):
+    if get_dataset_contract(dataset_name).label_type == "multilabel":
         results_dict["note"] = (
             "Clustering classes are unique multilabel combinations and should "
             "be interpreted as exploratory."

@@ -4,6 +4,8 @@ from scripts.data_audit import (
     AuditValidationError,
     IdentityAudit,
     ordered_ids_sha256,
+    read_dataset_protocol,
+    read_exclusion_policy,
     require_columns,
     resolve_required_files,
 )
@@ -99,6 +101,29 @@ class DataAuditTests(unittest.TestCase):
             ordered_ids_sha256(["ab", "c"]),
             ordered_ids_sha256(["a", "bc"]),
         )
+
+    def test_committed_exclusion_policies_are_strict_and_counted(self):
+        expected = {
+            "pad_ufes_exclusions.csv": 27,
+            "ham10000_exclusions.csv": 2,
+            "chexpert_exclusions.csv": 28,
+        }
+        for filename, count in expected.items():
+            with self.subTest(filename=filename):
+                policy, audit = read_exclusion_policy(filename)
+                self.assertEqual(len(policy), count)
+                self.assertEqual(audit["excluded_samples"], count)
+                self.assertEqual(len(audit["sha256"]), 64)
+
+    def test_every_dataset_has_an_audited_protocol(self):
+        for dataset_name in (
+            "pad_ufes", "ham10000", "chexpert", "cbis_ddsm", "odir"
+        ):
+            with self.subTest(dataset=dataset_name):
+                protocol, manifest = read_dataset_protocol(dataset_name)
+                self.assertGreater(protocol["retained_image_files"], 0)
+                self.assertIn("/versions/", protocol["dataset_handle"])
+                self.assertEqual(len(manifest["sha256"]), 64)
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ from sklearn.model_selection import StratifiedGroupKFold
 from scripts.dataset_contracts import get_dataset_contract
 
 
-MANIFEST_SCHEMA_VERSION = 3
+MANIFEST_SCHEMA_VERSION = 4
 
 
 def sample_ids_from_paths(dataset_name, image_paths):

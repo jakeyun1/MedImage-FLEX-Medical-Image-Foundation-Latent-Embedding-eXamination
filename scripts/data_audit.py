@@ -1,14 +1,21 @@
 """Dependency-free validation primitives for dataset loading audits."""
 
 from collections import Counter
+import csv
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 from typing import Iterable, Sequence, Tuple
 
 
 class AuditValidationError(ValueError):
     """Raised when a dataset identity audit violates its declared policy."""
+
+
+AUDIT_POLICY_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), os.pardir, "dataset_audits")
+)
 
 
 def require_columns(observed: Iterable[str], required: Iterable[str], context: str):
@@ -55,6 +62,89 @@ def ordered_ids_sha256(sample_ids: Sequence[str]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def file_sha256(path: str) -> str:
+    """Return a streaming SHA-256 digest for a file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_exclusion_policy(filename: str):
+    """Read and strictly validate one committed sample-exclusion policy."""
+    if not filename:
+        return {}, None
+
+    path = os.path.join(AUDIT_POLICY_DIR, filename)
+    if not os.path.isfile(path):
+        raise AuditValidationError(f"Dataset exclusion policy is missing: {path}")
+
+    with open(path, newline="", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        if reader.fieldnames != ["sample_id", "reason"]:
+            raise AuditValidationError(
+                f"Exclusion policy must contain sample_id,reason columns: {path}"
+            )
+        policy = {}
+        for row_number, row in enumerate(reader, start=2):
+            sample_id = row["sample_id"].strip()
+            reason = row["reason"].strip()
+            if not sample_id or not reason:
+                raise AuditValidationError(
+                    f"Blank exclusion policy value at row {row_number}: {path}"
+                )
+            if sample_id in policy:
+                raise AuditValidationError(
+                    f"Duplicate exclusion policy ID {sample_id!r}: {path}"
+                )
+            policy[sample_id] = reason
+
+    if not policy:
+        raise AuditValidationError(f"Exclusion policy contains no records: {path}")
+    return policy, {
+        "path": os.path.abspath(path),
+        "sha256": file_sha256(path),
+        "excluded_samples": len(policy),
+        "reason_counts": dict(sorted(Counter(policy.values()).items())),
+    }
+
+
+def read_dataset_protocol(dataset_name: str):
+    """Read one dataset's audited version and cardinality expectations."""
+    path = os.path.join(AUDIT_POLICY_DIR, "dataset_protocols.json")
+    if not os.path.isfile(path):
+        raise AuditValidationError(f"Dataset protocol manifest is missing: {path}")
+    with open(path, encoding="utf-8") as file:
+        manifest = json.load(file)
+    if manifest.get("schema_version") != 1:
+        raise AuditValidationError("Unsupported dataset protocol manifest schema.")
+    try:
+        protocol = manifest["datasets"][dataset_name]
+    except KeyError as exc:
+        raise AuditValidationError(
+            f"Dataset protocol is missing for {dataset_name!r}."
+        ) from exc
+    required = {
+        "dataset_handle",
+        "source_metadata_rows",
+        "discovered_image_files",
+        "retained_image_files",
+        "evaluation_unit",
+        "label_type",
+    }
+    missing = sorted(required - set(protocol))
+    if missing:
+        raise AuditValidationError(
+            f"Dataset protocol for {dataset_name} is missing fields: {missing}"
+        )
+    return dict(protocol), {
+        "path": os.path.abspath(path),
+        "sha256": file_sha256(path),
+        "schema_version": 1,
+    }
 
 
 def _duplicates(values: Sequence[str]) -> Tuple[str, ...]:

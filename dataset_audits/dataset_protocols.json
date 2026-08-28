@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "datasets": {
+    "pad_ufes": {
+      "dataset_handle": "mahdavi1202/skin-cancer/versions/1",
+      "source_metadata_rows": 2298,
+      "discovered_image_files": 2298,
+      "retained_image_files": 2271,
+      "evaluation_unit": "image",
+      "label_type": "multiclass"
+    },
+    "ham10000": {
+      "dataset_handle": "kmader/skin-cancer-mnist-ham10000/versions/2",
+      "source_metadata_rows": 10015,
+      "discovered_image_files": 10015,
+      "retained_image_files": 10013,
+      "evaluation_unit": "image",
+      "label_type": "multiclass"
+    },
+    "chexpert": {
+      "dataset_handle": "ashery/chexpert/versions/1",
+      "source_metadata_rows": 223414,
+      "discovered_image_files": 223414,
+      "retained_image_files": 223386,
+      "evaluation_unit": "radiograph",
+      "label_type": "multilabel"
+    },
+    "cbis_ddsm": {
+      "dataset_handle": "debjeetdas/breast-cancer-jpg-image-dataset-of-cbisddsm/versions/1",
+      "source_metadata_rows": 3568,
+      "discovered_image_files": 10239,
+      "retained_image_files": 3032,
+      "evaluation_unit": "full_mammogram",
+      "label_type": "multilabel"
+    },
+    "odir": {
+      "dataset_handle": "andrewmvd/ocular-disease-recognition-odir5k/versions/2",
+      "source_metadata_rows": 3500,
+      "discovered_image_files": 7000,
+      "retained_image_files": 7000,
+      "evaluation_unit": "patient",
+      "label_type": "multilabel"
+    }
+  }
+}

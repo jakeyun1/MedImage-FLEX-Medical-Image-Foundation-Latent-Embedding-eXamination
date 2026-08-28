@@ -21,11 +21,16 @@
         "shuffle": Flag for shuffling images while computing embeddings
                    (optional, default is false),
 
-        "max_samples": Approximate number of images in the evaluation cohort;
+        "max_samples": Approximate number of evaluation samples in the cohort;
                        complete patient/lesion groups are selected, so the actual
                        count may be slightly above or below this target;
+                       ODIR uses patients while the other datasets use images;
                        null uses all eligible samples
-                       (optional, default is 5000)
+                       (optional, default is 5000),
+
+        "chexpert_uncertainty_policy": CheXpert uncertain-label policy. One of
+                       "finding_specific" (primary), "u_zeros", or "u_ones"
+                       (optional, default is "finding_specific")
     },
 
     "normalize_embeddings": Flag for normalizing embeddings (optional, default is true),
@@ -140,6 +145,35 @@ CBIS-DDSM, CheXpert, and ODIR, and complete lesion groups for HAM10000, whose
 metadata does not provide patient IDs. Later model runs with the same configuration
 validate and reuse that manifest. Every result records the manifest path and SHA-256
 checksum, along with the requested and actual cohort sizes.
+
+MLP, KNN, and logistic-regression hyperparameters are all selected by maximizing
+macro F1 within the inner cross-validation folds. This gives each class or finding
+equal weight during model selection instead of allowing frequent labels to dominate.
+
+Every dataset result also contains two documentation blocks:
+
+- `data_audit.fingerprints` includes a traversal-independent SHA-256 of retained
+  sample IDs and a SHA-256 of canonical sample/group/processed-label records. These
+  are lightweight semantic fingerprints and deliberately do not hash image bytes.
+- `run_provenance` records a canonical SHA-256 of `config_used.json`'s content, the
+  Git commit/branch and separate tracked-change/untracked-file states when available,
+  Python and platform details, and relevant installed package versions. Tracked
+  changes mean the commit alone is not a complete description of the executed code;
+  untracked files are reported separately because they may be non-code artifacts.
+
+The ordered sample-ID hashes in `embedding_info` serve a different purpose: they
+document the exact row order of the embedding arrays and are expected to change if
+extraction order changes.
+
+The primary CheXpert policy maps uncertain Cardiomegaly and Consolidation labels
+to absent and uncertain Atelectasis, Edema, and Pleural Effusion labels to present.
+Unmentioned labels map to absent. The alternative `u_zeros` and `u_ones` settings
+are intended for prespecified sensitivity analyses.
+
+ODIR is evaluated as the original patient-level multilabel task. The left- and
+right-eye embeddings for each of the 3,500 labeled patients are mean-pooled and
+L2-normalized. Age and sex are recorded in the source audit but are not model
+inputs in this image-representation benchmark.
 
 ## Datasets
 - **Chest radiographs**
