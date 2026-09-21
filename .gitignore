@@ -9,3 +9,4 @@ scripts/__pycache__/
 *.sh
 output/
 tmp/
+playground.ipynb

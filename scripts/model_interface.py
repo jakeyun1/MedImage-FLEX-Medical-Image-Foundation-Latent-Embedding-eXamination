@@ -5,16 +5,44 @@ This file contains the backend logic the for various model types.
 """
 
 from abc import ABC, abstractmethod
+from enum import Enum
+import re
 import torch
 import numpy as np
-import tensorflow as tf
-from torchvision import transforms
-from transformers import AutoProcessor, AutoModel, AutoImageProcessor, AutoFeatureExtractor
+from PIL import Image
+from transformers import AutoFeatureExtractor, AutoImageProcessor, AutoModel, AutoProcessor
+
+try:
+    import tensorflow as tf
+except ImportError:  # TensorFlow is only required for TensorFlow-backed models.
+    tf = None
+
+
+def _json_safe(value):
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _require_matrix(output, context):
+    if not hasattr(output, "shape") or len(output.shape) != 2:
+        shape = getattr(output, "shape", None)
+        raise ValueError(f"{context} must return a [batch, dimension] matrix; found {shape}.")
+    return output
 
 class EmbeddingBackend(ABC):
-    def __init__(self, model_id, device):
+    def __init__(self, model_id, device, preprocessing_spec):
         self.model_id = model_id
         self.device = device
+        if not isinstance(preprocessing_spec, dict) or not preprocessing_spec:
+            raise ValueError("Every embedding backend must declare a preprocessing contract.")
+        self.preprocessing_spec = _json_safe(preprocessing_spec)
 
     def transform_function(self, image):
         """
@@ -59,10 +87,12 @@ class EmbeddingBackend(ABC):
         pass
 
 class TorchvisionBackend(EmbeddingBackend):
-    def __init__(self, model_id, model, device, target_size = [224, 224]):
-        super().__init__(model_id, device)
+    def __init__(self, model_id, model, device, transform, preprocessing_spec,
+                 target_size = [224, 224]):
+        super().__init__(model_id, device, preprocessing_spec)
         self.target_size = tuple(target_size)
         self.model = model.to(device).eval()
+        self.transform = transform
 
     def get_transform(self):
         """
@@ -70,15 +100,7 @@ class TorchvisionBackend(EmbeddingBackend):
         
         Changed for each specific model.
         """
-        # ResNet50/DenseNet121
-        transform = transforms.Compose([
-            transforms.Resize(self.target_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean = [0.485, 0.456, 0.406], 
-                                 std = [0.229, 0.224, 0.225]),
-        ])
-
-        return transform
+        return self.transform
 
     @torch.no_grad()
     def encode_batch(self, images):
@@ -88,8 +110,8 @@ class TorchvisionBackend(EmbeddingBackend):
         if isinstance(images, (list, tuple)):
             images = torch.stack(images)
         images = images.to(self.device)
-        embs = self.model(images)           # assumes `final layer` == torch.nn.Identity()
-        return embs
+        embs = self.model(images)
+        return _require_matrix(embs, f"{self.model_id} embedding output")
 
     @property
     def embedding_dim(self):
@@ -103,24 +125,88 @@ class TorchvisionBackend(EmbeddingBackend):
         return out.shape[-1]
 
 class HuggingFaceVisionBackend(EmbeddingBackend):
-    def __init__(self, model_id, device, target_size = [448, 448], output_key = None):
-        super().__init__(model_id, device)
-
+    def __init__(self, model_id, device, revision, target_size = [448, 448],
+                 output_key = None):
         # --- General models ---
+        if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}", revision):
+            raise ValueError(
+                f"{model_id} must use an immutable 40-character Hugging Face "
+                "commit revision."
+            )
         self.target_size = tuple(target_size)
-        self.model = AutoModel.from_pretrained(model_id, trust_remote_code = True).to(device).eval()
+        self.revision = revision
+        self.model = AutoModel.from_pretrained(
+            model_id,
+            revision=revision,
+            trust_remote_code=True,
+        ).to(device).eval()
         
-        # Try three different ways to load an image processor 
+        # Prefer the image-only processor so text/tokenizer state is not part of
+        # an image-embedding pipeline. Retain broader loaders as compatibility fallbacks.
         try:
-            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code = True, use_fast = True)
+            self.processor = AutoImageProcessor.from_pretrained(
+                model_id,
+                revision=revision,
+                trust_remote_code=True,
+                use_fast=True,
+            )
         except Exception:
             try:
-                self.processor = AutoImageProcessor.from_pretrained(model_id, trust_remote_code = True, use_fast = True)
+                self.processor = AutoProcessor.from_pretrained(
+                    model_id,
+                    revision=revision,
+                    trust_remote_code=True,
+                    use_fast=True,
+                )
             except Exception:
-                self.processor = AutoFeatureExtractor.from_pretrained(model_id, trust_remote_code = True, use_fast = True)
+                self.processor = AutoFeatureExtractor.from_pretrained(
+                    model_id,
+                    revision=revision,
+                    trust_remote_code=True,
+                    use_fast=True,
+                )
 
-        # If the user does NOT specify output_key, we auto-detect it later
         self.output_key = output_key
+        if hasattr(self.model, "get_image_features"):
+            embedding_output = {
+                "method": "get_image_features",
+                "fallback_key": output_key,
+            }
+        elif output_key is not None:
+            embedding_output = {
+                "method": "model_forward",
+                "key": output_key,
+            }
+        else:
+            raise ValueError(
+                f"{model_id} must declare an embedding output key."
+            )
+
+        processor_fields = (
+            "do_convert_rgb", "do_resize", "size", "resample",
+            "do_center_crop", "crop_size", "do_rescale", "rescale_factor",
+            "do_normalize", "image_mean", "image_std",
+        )
+        processor_settings = {
+            field: _json_safe(getattr(self.processor, field))
+            for field in processor_fields
+            if hasattr(self.processor, field)
+        }
+        super().__init__(model_id, device, {
+            "schema_version": 1,
+            "model_id": model_id,
+            "framework": "transformers",
+            "weights": {
+                "source": model_id,
+                "revision": revision,
+            },
+            "input": {
+                "color_mode": "RGB",
+                "processor_class": type(self.processor).__name__,
+                "processor_settings": processor_settings,
+            },
+            "embedding_output": embedding_output,
+        })
 
     def get_transform(self):
         # Usually we bypass torch transforms and let the processor handle everything
@@ -152,35 +238,20 @@ class HuggingFaceVisionBackend(EmbeddingBackend):
             # Catch newer HF versions returning an Output object instead of a tensor
             if not isinstance(embs, torch.Tensor):
                 # Use user-provided key if it exists
-                if self.output_key is not None:
-                    return embs[self.output_key]
-                
-                # Auto-detect and save the key for future batches
-                for key in ["image_embeds", "pooler_output"]:
-                    if key in embs and embs[key] is not None:
-                        self.output_key = key
-                        return embs[self.output_key]
-                
-                # Fallback: grab the first tensor we find
-                for k, v in embs.items():
-                    if isinstance(v, torch.Tensor):
-                        self.output_key = k
-                        return embs[self.output_key]
+                if self.output_key is None:
+                    raise ValueError(
+                        f"{self.model_id} get_image_features returned a structured "
+                        "output without a declared key."
+                    )
+                embs = embs[self.output_key]
 
-            return embs
+            return _require_matrix(embs, f"{self.model_id} embedding output")
 
         # Otherwise, assume it's a vision-only model where forward(pixel_values = pass) works
         outputs = self.model(pixel_values = pixel_values)
 
-        # Auto-select a tensor output field once
-        if self.output_key is None:
-            for k, v in outputs.items():
-                if isinstance(v, torch.Tensor):
-                    self.output_key = k
-                    break
-
         embs = outputs[self.output_key]
-        return embs
+        return _require_matrix(embs, f"{self.model_id} embedding output")
 
     @property
     def embedding_dim(self):
@@ -188,23 +259,18 @@ class HuggingFaceVisionBackend(EmbeddingBackend):
         Returns the length of the embedding vector.
         """
         dummy = torch.zeros(1, 3, *self.target_size).to(self.device) # Image vector depends on model
-        with torch.no_grad():
-            out = self.model(pixel_values = dummy)
-
-        if self.output_key is None:
-            for key, value in out.items():
-                if isinstance(value, torch.Tensor):
-                    self.output_key = key
-                    break
-
-        return out[self.output_key].shape[-1]
+        return self.encode_batch(dummy).shape[-1]
     
 class TensorFlowBackend(EmbeddingBackend):
-    def __init__(self, model_id, model_path_or_obj, device, target_size = [224, 224], output_key = None):
-        super().__init__(model_id, device)
+    def __init__(self, model_id, model_path_or_obj, device, preprocessing_spec,
+                 preprocess_function=None, target_size = [224, 224], output_key = None):
+        if tf is None:
+            raise ImportError("TensorFlow is required for TensorFlowBackend.")
+        super().__init__(model_id, device, preprocessing_spec)
         self.target_size = tuple(target_size)
+        self.preprocess_function = preprocess_function
+        self.resize_resample = Image.Resampling.BILINEAR
 
-        # If the user does NOT specify output_key, we auto-detect it later
         self.output_key = output_key
         
         # If a local file path, load the model
@@ -222,15 +288,14 @@ class TensorFlowBackend(EmbeddingBackend):
         """
         Returns the transform to be applied to each image.
 
-        Uses either tf.image transformations or lets the model itself handle preprocessing
-        This default transformation takes PIL -> NumPy -> tf.Tensor for direct use in a model
-        No other preprocessing is applied to the image.
-
-        Changed for each specific model.
+        Resize a PIL image and apply the preprocessing function declared by the model.
         """
         def to_tf_tensor(img):
-            img = img.resize(self.target_size)
-            img = np.array(img)
+            img = img.resize(self.target_size, resample=self.resize_resample)
+            # Use a writable array because Keras preprocessing functions may operate in place.
+            img = np.array(img, dtype=np.float32, copy=True)
+            if self.preprocess_function is not None:
+                img = self.preprocess_function(img)
             img = tf.convert_to_tensor(img, dtype = tf.float32)
 
             return img
@@ -256,20 +321,17 @@ class TensorFlowBackend(EmbeddingBackend):
 
         # Handle dictionary outputs safely
         if isinstance(tf_out, dict):
-            if self.output_key:
-                tf_out = tf_out[self.output_key]
-            else:
-                for (k, v) in tf_out.items():
-                    if isinstance(v, tf.Tensor) and len(v.shape) == 2:
-                        self.output_key = k
-                        break
-                
-                tf_out = tf_out[self.output_key]
+            if not self.output_key:
+                raise ValueError(
+                    f"{self.model_id} returned a dictionary without a declared output key."
+                )
+            tf_out = tf_out[self.output_key]
     
         tf_out = tf_out.numpy() if hasattr(tf_out, 'numpy') else np.array(tf_out)
             
         # Return as a PyTorch tensor on the correct device (GPU/CPU)
-        return torch.from_numpy(tf_out).float().to(self.device)
+        output = torch.from_numpy(tf_out).float().to(self.device)
+        return _require_matrix(output, f"{self.model_id} embedding output")
 
     @property
     def embedding_dim(self):
@@ -281,14 +343,10 @@ class TensorFlowBackend(EmbeddingBackend):
         out = self.model(dummy, training = False)
         
         if isinstance(out, dict):
-            if self.output_key:
-                out = out[self.output_key]
-            else:
-                for (k, v) in out.items():
-                    if isinstance(v, tf.Tensor) and len(v.shape) == 2:
-                        self.output_key = k
-                        break
-                
-                out = out[self.output_key]
+            if not self.output_key:
+                raise ValueError(
+                    f"{self.model_id} returned a dictionary without a declared output key."
+                )
+            out = out[self.output_key]
                 
         return out.shape[-1]

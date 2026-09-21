@@ -4,7 +4,10 @@ run_benchmark.py
 This file executes the testbench.
 """
 
+import os
 from time import perf_counter
+
+from scripts.oof import OOF_SCHEMA_VERSION, write_oof_artifact
 from scripts.tests import *
 
 def timed_call(fn, *args, **kwargs):
@@ -14,7 +17,8 @@ def timed_call(fn, *args, **kwargs):
 
 def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                   outer_folds = None, n_splits = 5, random_state = 42,
-                  group_col = None, sample_ids = None):
+                  group_col = None, sample_ids = None, oof_output_dir = None,
+                  oof_path_prefix = None):
     """
     Runs the testbench and returns the results for all adapters (for a given model on a given dataset).
 
@@ -34,30 +38,57 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         MLP_cv, dataset_name, embeddings, metadata_df,
         image_paths, id_col = id_col, label_col = label_col, n_splits = n_splits,
         random_state = random_state, outer_folds = outer_folds, group_col = group_col,
-        sample_ids = sample_ids
+        sample_ids = sample_ids, return_oof = True
     )
     print(f"Completed MLP CV benchmark on {dataset_name}.\n")
 
-    mlp_summary, dataset_info = mlp_tuple
+    mlp_summary, dataset_info, mlp_oof = mlp_tuple
 
     # KNN
-    knn_summary, knn_seconds = timed_call(
+    knn_tuple, knn_seconds = timed_call(
         KNN_cv, dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col, n_splits = n_splits,
         random_state = random_state, outer_folds = outer_folds, group_col = group_col,
-        sample_ids = sample_ids
+        sample_ids = sample_ids, return_oof = True
     )
+    knn_summary, knn_oof = knn_tuple
 
     print(f"Completed KNN CV benchmark on {dataset_name}.\n")
 
     # LR
-    logreg_summary, logreg_seconds = timed_call(
+    logreg_tuple, logreg_seconds = timed_call(
         logistic_regression_cv, dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col, n_splits = n_splits,
         random_state = random_state, outer_folds = outer_folds, group_col = group_col,
-        sample_ids = sample_ids
+        sample_ids = sample_ids, return_oof = True
     )
+    logreg_summary, logreg_oof = logreg_tuple
     print(f"Completed Logistic Regression CV benchmarks on {dataset_name}.\n")
+
+    oof_started = perf_counter()
+    oof_metadata = {
+        "schema_version": OOF_SCHEMA_VERSION,
+        "enabled": oof_output_dir is not None,
+        "artifacts": {},
+    }
+    if oof_output_dir is not None:
+        for adapter, artifact in (
+            ("mlp", mlp_oof),
+            ("knn", knn_oof),
+            ("logistic_regression", logreg_oof),
+        ):
+            filename = f"{adapter}.npz"
+            relative_path = (
+                os.path.join(oof_path_prefix, filename)
+                if oof_path_prefix is not None else None
+            )
+            oof_metadata["artifacts"][adapter] = write_oof_artifact(
+                artifact,
+                oof_output_dir,
+                filename,
+                relative_path=relative_path,
+            )
+    oof_seconds = perf_counter() - oof_started
 
     # Retrieval
     ret_results, retrieval_seconds = timed_call(
@@ -80,11 +111,12 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
 
     # Compile the results
     results = {
-        "result_schema_version": 2,
+        "result_schema_version": 3,
         "dataset_info": dataset_info,
         "mlp_cv": mlp_summary,
         "knn_cv": knn_summary,
         "logreg_cv": logreg_summary,
+        "oof_predictions": oof_metadata,
         "retrieval": ret_results,
         "clustering": clustering_results,
         "runtime": {
@@ -95,6 +127,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
                 "mlp_cv": float(mlp_seconds),
                 "knn_cv": float(knn_seconds),
                 "logreg_cv": float(logreg_seconds),
+                "oof_serialization": float(oof_seconds),
                 "retrieval": float(retrieval_seconds),
                 "clustering": float(clustering_seconds)
             }

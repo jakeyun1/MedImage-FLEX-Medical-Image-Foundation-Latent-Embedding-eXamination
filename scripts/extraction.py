@@ -11,10 +11,19 @@ from tqdm import tqdm
 
 from scripts.data_audit import ordered_ids_sha256
 from scripts.dataset_contracts import get_dataset_contract
+from scripts.provenance import canonical_json_sha256
 
 
-CACHE_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 2
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|"]
+PREPROCESSING_SPEC_FIELDS = {
+    "schema_version",
+    "model_id",
+    "framework",
+    "weights",
+    "input",
+    "embedding_output",
+}
 
 
 def _clean_filename(filename, desired_char):
@@ -23,8 +32,24 @@ def _clean_filename(filename, desired_char):
     return filename
 
 
+def preprocessing_fingerprint(backend):
+    spec = getattr(backend, "preprocessing_spec", None)
+    if not isinstance(spec, dict):
+        raise ValueError("Embedding backend is missing its preprocessing contract.")
+    missing = sorted(PREPROCESSING_SPEC_FIELDS - set(spec))
+    if missing:
+        raise ValueError(f"Preprocessing contract is missing fields: {missing}")
+    if str(spec["model_id"]) != str(backend.model_id):
+        raise ValueError("Preprocessing contract model ID does not match the backend.")
+    return canonical_json_sha256(spec)
+
+
 def _cache_paths(dataloader, backend, normalize):
-    filename = f"{backend.model_id}+{dataloader.dataset_name}"
+    preprocessing_sha256 = preprocessing_fingerprint(backend)
+    filename = (
+        f"{backend.model_id}+{dataloader.dataset_name}+"
+        f"pre-{preprocessing_sha256[:12]}"
+    )
     filename = _clean_filename(filename, "-").replace(".", "")
     normalization = "normalized" if normalize else "unnormalized"
     base_path = f".{os.sep}embeddings{os.sep}{filename}-{normalization}"
@@ -64,6 +89,7 @@ def _write_embedding_cache(
     sample_ids,
     dataset_name,
     model_id,
+    preprocessing_sha256,
     normalize,
 ):
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
@@ -74,6 +100,7 @@ def _write_embedding_cache(
             schema_version=np.asarray(CACHE_SCHEMA_VERSION, dtype=np.int64),
             dataset_name=np.asarray(str(dataset_name)),
             model_id=np.asarray(str(model_id)),
+            preprocessing_sha256=np.asarray(str(preprocessing_sha256)),
             normalized=np.asarray(bool(normalize)),
             sample_ids=np.asarray(sample_ids, dtype=str),
             ordered_ids_sha256=np.asarray(ordered_ids_sha256(sample_ids)),
@@ -90,6 +117,7 @@ def _load_embedding_cache(filepath, dataloader, backend, normalize):
         "schema_version",
         "dataset_name",
         "model_id",
+        "preprocessing_sha256",
         "normalized",
         "sample_ids",
         "ordered_ids_sha256",
@@ -104,6 +132,9 @@ def _load_embedding_cache(filepath, dataloader, backend, normalize):
             schema_version = int(cache_file["schema_version"].item())
             dataset_name = str(cache_file["dataset_name"].item())
             model_id = str(cache_file["model_id"].item())
+            cached_preprocessing_sha256 = str(
+                cache_file["preprocessing_sha256"].item()
+            )
             cached_normalize = bool(cache_file["normalized"].item())
             cached_sample_ids = cache_file["sample_ids"].astype(str).tolist()
             cached_hash = str(cache_file["ordered_ids_sha256"].item())
@@ -125,6 +156,11 @@ def _load_embedding_cache(filepath, dataloader, backend, normalize):
         raise ValueError(
             f"Embedding cache model mismatch at {filepath}: "
             f"expected {backend.model_id}, found {model_id}."
+        )
+    current_preprocessing_sha256 = preprocessing_fingerprint(backend)
+    if cached_preprocessing_sha256 != current_preprocessing_sha256:
+        raise ValueError(
+            f"Embedding cache preprocessing mismatch at {filepath}."
         )
     if cached_normalize != bool(normalize):
         raise ValueError(f"Embedding cache normalization mismatch at {filepath}.")
@@ -155,6 +191,7 @@ def _load_embedding_cache(filepath, dataloader, backend, normalize):
 def extract_embeddings(dataloader, backend, normalize=True, cache=False):
     """Extract embeddings while preserving their exact image-row correspondence."""
     filepath, legacy_filepath = _cache_paths(dataloader, backend, normalize)
+    preprocessing_sha256 = preprocessing_fingerprint(backend)
 
     if cache and os.path.exists(filepath):
         print(f"Embeddings cache detected! Loading '{os.path.abspath(filepath)}'")
@@ -208,6 +245,7 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False):
             sample_ids,
             dataloader.dataset_name,
             backend.model_id,
+            preprocessing_sha256,
             normalize,
         )
         print(f"Embeddings cached to: {os.path.abspath(filepath)}\n")

@@ -68,7 +68,7 @@ def compute_classification_averages(json_list):
     for file in json_list:
         with open(file, "r") as f:
             dataset_results = json.load(f)
-        if dataset_results.get("result_schema_version") != 2:
+        if dataset_results.get("result_schema_version") != 3:
             raise ValueError(
                 f"{file} uses an incompatible result schema; regenerate its results."
             )

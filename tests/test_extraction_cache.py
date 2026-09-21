@@ -4,7 +4,12 @@ import unittest
 
 import numpy as np
 
-from scripts.extraction import CACHE_SCHEMA_VERSION, _cache_paths, extract_embeddings
+from scripts.extraction import (
+    CACHE_SCHEMA_VERSION,
+    _cache_paths,
+    extract_embeddings,
+    preprocessing_fingerprint,
+)
 
 
 class FakeTensor:
@@ -36,9 +41,17 @@ class FakeDataLoader:
 class FakeBackend:
     model_id = "research/model.v1"
 
-    def __init__(self, batch_embeddings):
+    def __init__(self, batch_embeddings, preprocessing_tag="v1"):
         self.batch_embeddings = iter(batch_embeddings)
         self.calls = 0
+        self.preprocessing_spec = {
+            "schema_version": 1,
+            "model_id": self.model_id,
+            "framework": "fixture",
+            "weights": "fixture-weights",
+            "input": {"preprocessing_tag": preprocessing_tag},
+            "embedding_output": {"method": "fixture"},
+        }
 
     def encode_batch(self, images):
         self.calls += 1
@@ -113,6 +126,7 @@ class ExtractionCacheTests(unittest.TestCase):
             schema_version=np.asarray(CACHE_SCHEMA_VERSION),
             dataset_name=np.asarray("ham10000"),
             model_id=np.asarray(backend.model_id),
+            preprocessing_sha256=np.asarray(preprocessing_fingerprint(backend)),
             normalized=np.asarray(False),
             sample_ids=np.asarray(["a.jpg", "b.jpg"]),
             ordered_ids_sha256=np.asarray("incorrect"),
@@ -128,6 +142,48 @@ class ExtractionCacheTests(unittest.TestCase):
         normalized, _ = _cache_paths(loader, backend, normalize=True)
         unnormalized, _ = _cache_paths(loader, backend, normalize=False)
         self.assertNotEqual(normalized, unnormalized)
+
+    def test_preprocessing_change_uses_a_distinct_cache(self):
+        paths = ["/data/a.jpg"]
+        loader = FakeDataLoader("ham10000", paths, [(["a"], paths)])
+        first_backend = FakeBackend([[[1.0]]], preprocessing_tag="v1")
+        first_path, _ = _cache_paths(loader, first_backend, normalize=False)
+        extract_embeddings(loader, first_backend, normalize=False, cache=True)
+
+        changed_loader = FakeDataLoader("ham10000", paths, [(["a"], paths)])
+        changed_backend = FakeBackend([[[2.0]]], preprocessing_tag="v2")
+        changed_path, _ = _cache_paths(
+            changed_loader, changed_backend, normalize=False
+        )
+        embeddings, _, source = extract_embeddings(
+            changed_loader, changed_backend, normalize=False, cache=True
+        )
+
+        self.assertNotEqual(first_path, changed_path)
+        self.assertEqual(source, "computed")
+        self.assertEqual(changed_backend.calls, 1)
+        np.testing.assert_array_equal(embeddings, [[2.0]])
+
+    def test_cache_rejects_tampered_preprocessing_fingerprint(self):
+        paths = ["/data/a.jpg"]
+        loader = FakeDataLoader("ham10000", paths, [])
+        backend = FakeBackend([])
+        filepath, _ = _cache_paths(loader, backend, normalize=False)
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        np.savez(
+            filepath,
+            schema_version=np.asarray(CACHE_SCHEMA_VERSION),
+            dataset_name=np.asarray("ham10000"),
+            model_id=np.asarray(backend.model_id),
+            preprocessing_sha256=np.asarray("incorrect"),
+            normalized=np.asarray(False),
+            sample_ids=np.asarray(["a.jpg"]),
+            ordered_ids_sha256=np.asarray("unused"),
+            embeddings=np.asarray([[1.0]]),
+        )
+
+        with self.assertRaisesRegex(ValueError, "preprocessing mismatch"):
+            extract_embeddings(loader, backend, normalize=False, cache=True)
 
     def test_extraction_rejects_batch_row_mismatch(self):
         paths = ["/data/a.jpg", "/data/b.jpg"]

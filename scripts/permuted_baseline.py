@@ -42,7 +42,7 @@ def generate_permuted_embeddings(embeddings, seed, row_indices=None):
 
 
 def _validate_cached_result(result, expected, manifest_info):
-    if result.get("result_schema_version") != 2:
+    if result.get("result_schema_version") != 3:
         raise ValueError(
             "Cached permuted baseline uses an incompatible result schema; "
             "rerun it with overwrite enabled."

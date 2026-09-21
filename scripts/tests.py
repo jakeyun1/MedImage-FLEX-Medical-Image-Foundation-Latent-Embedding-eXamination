@@ -32,6 +32,7 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
 
 from scripts.dataset_contracts import DATASET_CONTRACTS, get_dataset_contract
+from scripts.oof import OOFAccumulator, validate_oof_artifact
 
 # Silence Optuna's extensive logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -214,6 +215,8 @@ def _inner_cv_splitter(is_multilabel, y, n_splits, random_state):
 def _group_ids_for_samples(metadata_df, id_col, group_col, sample_ids):
     if group_col is None:
         return None
+    if group_col == id_col:
+        return np.asarray(sample_ids, dtype=str)
 
     identifiers = metadata_df[[id_col, group_col]].dropna().copy()
     identifiers[id_col] = identifiers[id_col].astype(str)
@@ -358,38 +361,48 @@ def _per_class_metrics(y_true, y_pred, classes, is_multilabel):
         for idx, cls in enumerate(classes)
     }
 
-def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None):
-    if y_pred is None:
-        y_pred = pipe.predict(X_test)
+def _classification_scores(y_true, y_pred, proba, is_multilabel):
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    proba = np.asarray(proba, dtype=float)
 
     scores = {
-        "f1_macro": f1_score(y_test, y_pred, average = "macro", zero_division = 0),
-        "f1_weighted": f1_score(y_test, y_pred, average = "weighted", zero_division = 0),
-        "precision_weighted": precision_score(y_test, y_pred, average = "weighted", zero_division = 0),
+        "f1_macro": f1_score(y_true, y_pred, average = "macro", zero_division = 0),
+        "f1_weighted": f1_score(y_true, y_pred, average = "weighted", zero_division = 0),
+        "precision_weighted": precision_score(
+            y_true, y_pred, average = "weighted", zero_division = 0
+        ),
     }
     if is_multilabel:
-        scores["exact_match_accuracy"] = accuracy_score(y_test, y_pred)
+        scores["exact_match_accuracy"] = accuracy_score(y_true, y_pred)
+        valid_cols = [
+            i for i in range(y_true.shape[1])
+            if len(np.unique(y_true[:, i])) > 1
+        ]
+        scores["roc_auc"] = (
+            roc_auc_score(
+                y_true[:, valid_cols], proba[:, valid_cols], average = "macro"
+            )
+            if valid_cols else np.nan
+        )
     else:
-        scores["accuracy"] = accuracy_score(y_test, y_pred)
-        scores["balanced_accuracy"] = balanced_accuracy_score(y_test, y_pred)
-
-    proba = _extract_positive_proba(pipe.predict_proba(X_test))
-
-    if is_multilabel:
-        # Only calculate ROC-AUC for columns that contain both 0s and 1s in y_test
-        valid_cols = [i for i in range(y_test.shape[1]) if len(np.unique(y_test[:, i])) > 1]
-        
-        if len(valid_cols) > 0:
-            scores["roc_auc"] = roc_auc_score(y_test[:, valid_cols], proba[:, valid_cols], average = "macro")
-        else:
-            scores["roc_auc"] = np.nan
-            
-    elif proba.shape[1] == 2:
-        scores["roc_auc"] = roc_auc_score(y_test, proba[:, 1])
-    else:
-        scores["roc_auc"] = roc_auc_score(y_test, proba, multi_class = "ovr", average = "macro")
-
+        scores["accuracy"] = accuracy_score(y_true, y_pred)
+        scores["balanced_accuracy"] = balanced_accuracy_score(y_true, y_pred)
+        scores["roc_auc"] = (
+            roc_auc_score(y_true, proba[:, 1])
+            if proba.shape[1] == 2 else
+            roc_auc_score(y_true, proba, multi_class = "ovr", average = "macro")
+        )
     return scores
+
+
+def _evaluate_classifier(pipe, X_test, y_test, is_multilabel, y_pred = None,
+                         return_proba = False):
+    if y_pred is None:
+        y_pred = pipe.predict(X_test)
+    proba = _extract_positive_proba(pipe.predict_proba(X_test))
+    scores = _classification_scores(y_test, y_pred, proba, is_multilabel)
+    return (scores, proba) if return_proba else scores
 
 
 def _classification_metric_names(is_multilabel):
@@ -426,9 +439,37 @@ def _most_common_params(params_by_fold):
     return dict(counts.most_common(1)[0][0])
 
 
+def _validate_oof_metric_consistency(artifact, fold_score_rows, is_multilabel):
+    """Prove that stored fold metrics are reproducible from the OOF arrays."""
+    validate_oof_artifact(artifact)
+    folds = np.asarray(artifact["outer_folds"], dtype=int)
+    observed_folds = sorted(np.unique(folds).tolist())
+    if len(fold_score_rows) != len(observed_folds):
+        raise ValueError("OOF folds do not match the stored fold summaries.")
+
+    for fold_index, fold_row in zip(observed_folds, fold_score_rows):
+        if int(fold_row["fold"]) != fold_index + 1:
+            raise ValueError("OOF fold numbering does not match fold summaries.")
+        mask = folds == fold_index
+        recomputed = _classification_scores(
+            np.asarray(artifact["y_true"])[mask],
+            np.asarray(artifact["y_pred"])[mask],
+            np.asarray(artifact["y_score"])[mask],
+            is_multilabel,
+        )
+        for metric, value in recomputed.items():
+            stored = float(fold_row[metric])
+            if not np.isclose(stored, value, rtol=1e-12, atol=1e-12, equal_nan=True):
+                raise ValueError(
+                    f"OOF-derived {metric} does not match fold {fold_index + 1}."
+                )
+    return True
+
+
 def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
            label_col, n_splits = 5, random_state = 42, n_trials = 20,
-           outer_folds = None, group_col = None, sample_ids = None):
+           outer_folds = None, group_col = None, sample_ids = None,
+           return_oof = False):
     """
     Tests the embeddings on an MLP adapter.
 
@@ -458,6 +499,9 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
+    oof = OOFAccumulator(
+        dataset_name, "mlp", sample_ids, group_ids, y, classes, is_multilabel
+    )
     print(f"--- Optimizing MLP with Optuna ({n_trials} trials) ---")
 
     def build_pipe(params, max_iter):
@@ -481,9 +525,6 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
-    y_true_parts = []
-    y_pred_parts = []
-
     optuna_seeds = []
     for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
@@ -527,25 +568,30 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         final_pipe = build_pipe(study.best_params, max_iter = 500)
         final_pipe.fit(X_train, y_train)
         y_pred = final_pipe.predict(X_test)
-        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+        scores, y_score = _evaluate_classifier(
+            final_pipe, X_test, y_test, is_multilabel,
+            y_pred = y_pred, return_proba = True
+        )
+        oof.record(test_idx, fold_idx - 1, y_test, y_pred, y_score)
 
         for metric, score in scores.items():
             fold_scores[metric].append(float(score))
 
         fold_score_rows.append(_fold_summary(fold_idx, scores))
-        y_true_parts.append(y_test)
-        y_pred_parts.append(y_pred)
-
         print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
 
+    oof_artifact = oof.finalize()
+    _validate_oof_metric_consistency(
+        oof_artifact, fold_score_rows, is_multilabel
+    )
     summary = _summarize_fold_scores(fold_scores)
     summary["classes"] = classes
     summary["best_params"] = _most_common_params(best_params_by_fold)
     summary["best_params_by_fold"] = best_params_by_fold
     summary["fold_scores"] = fold_score_rows
     summary["per_class"] = _per_class_metrics(
-        np.concatenate(y_true_parts),
-        np.concatenate(y_pred_parts),
+        oof_artifact["y_true"],
+        oof_artifact["y_pred"],
         classes,
         is_multilabel
     )
@@ -577,11 +623,13 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         m, s = summary[k]
         print(f"  {k:18s}: {m:.4f} ± {s:.4f}")
 
+    if return_oof:
+        return summary, dataset_info, oof_artifact
     return summary, dataset_info
 
 def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
            n_splits = 5, random_state = 42, n_trials = 15, outer_folds = None,
-           group_col = None, sample_ids = None):
+           group_col = None, sample_ids = None, return_oof = False):
     """
     Tests the embeddings on a KNN adapter.
 
@@ -622,14 +670,14 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
+    oof = OOFAccumulator(
+        dataset_name, "knn", sample_ids, group_ids, y, classes, is_multilabel
+    )
     metric_names = _classification_metric_names(is_multilabel)
     fold_scores = {metric: [] for metric in metric_names}
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
-    y_true_parts = []
-    y_pred_parts = []
-
     optuna_seeds = []
     for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
@@ -671,17 +719,22 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         final_pipe = build_pipe(study.best_params)
         final_pipe.fit(X_train, y_train)
         y_pred = final_pipe.predict(X_test)
-        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+        scores, y_score = _evaluate_classifier(
+            final_pipe, X_test, y_test, is_multilabel,
+            y_pred = y_pred, return_proba = True
+        )
+        oof.record(test_idx, fold_idx - 1, y_test, y_pred, y_score)
 
         for metric, score in scores.items():
             fold_scores[metric].append(float(score))
 
         fold_score_rows.append(_fold_summary(fold_idx, scores))
-        y_true_parts.append(y_test)
-        y_pred_parts.append(y_pred)
-
         print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
 
+    oof_artifact = oof.finalize()
+    _validate_oof_metric_consistency(
+        oof_artifact, fold_score_rows, is_multilabel
+    )
     score_summary = _summarize_fold_scores(fold_scores)
     best_params = _most_common_params(best_params_by_fold)
 
@@ -693,8 +746,8 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         "best_params_by_fold": best_params_by_fold,
         "fold_scores": fold_score_rows,
         "per_class": _per_class_metrics(
-            np.concatenate(y_true_parts),
-            np.concatenate(y_pred_parts),
+            oof_artifact["y_true"],
+            oof_artifact["y_pred"],
             classes,
             is_multilabel
         ),
@@ -720,11 +773,14 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         mean, std = summary[metric]
         print(f"  {metric:18s}: {mean:.4f} ± {std:.4f}")
 
+    if return_oof:
+        return summary, oof_artifact
     return summary
 
 def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                            n_splits = 5, random_state = 42, n_trials = 15,
-                           outer_folds = None, group_col = None, sample_ids = None):
+                           outer_folds = None, group_col = None, sample_ids = None,
+                           return_oof = False):
     """
     Tests the embeddings on a LR adapter.
 
@@ -754,6 +810,10 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         X, y, is_multilabel, n_splits, random_state, sample_ids, outer_folds,
         group_ids
     )
+    oof = OOFAccumulator(
+        dataset_name, "logistic_regression", sample_ids, group_ids,
+        y, classes, is_multilabel
+    )
     print(f"--- Optimizing Logistic Regression with Optuna ({n_trials} trials) ---")
 
     def build_pipe(params, n_rows, max_iter):
@@ -782,9 +842,6 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
     fold_score_rows = []
     best_params_by_fold = []
     inner_folds_by_fold = []
-    y_true_parts = []
-    y_pred_parts = []
-
     optuna_seeds = []
     for fold_idx, (train_idx, test_idx) in enumerate(outer_splits, start = 1):
         X_train, X_test = X[train_idx], X[test_idx]
@@ -823,25 +880,30 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         final_pipe = build_pipe(study.best_params, len(X_train), max_iter = 3000)
         final_pipe.fit(X_train, y_train)
         y_pred = final_pipe.predict(X_test)
-        scores = _evaluate_classifier(final_pipe, X_test, y_test, is_multilabel, y_pred = y_pred)
+        scores, y_score = _evaluate_classifier(
+            final_pipe, X_test, y_test, is_multilabel,
+            y_pred = y_pred, return_proba = True
+        )
+        oof.record(test_idx, fold_idx - 1, y_test, y_pred, y_score)
 
         for metric, score in scores.items():
             fold_scores[metric].append(float(score))
 
         fold_score_rows.append(_fold_summary(fold_idx, scores))
-        y_true_parts.append(y_test)
-        y_pred_parts.append(y_pred)
-
         print(f"  Fold {fold_idx}/{n_splits} best params: {study.best_params}")
 
+    oof_artifact = oof.finalize()
+    _validate_oof_metric_consistency(
+        oof_artifact, fold_score_rows, is_multilabel
+    )
     summary = _summarize_fold_scores(fold_scores)
     summary["classes"] = classes
     summary["best_params"] = _most_common_params(best_params_by_fold)
     summary["best_params_by_fold"] = best_params_by_fold
     summary["fold_scores"] = fold_score_rows
     summary["per_class"] = _per_class_metrics(
-        np.concatenate(y_true_parts),
-        np.concatenate(y_pred_parts),
+        oof_artifact["y_true"],
+        oof_artifact["y_pred"],
         classes,
         is_multilabel
     )
@@ -867,6 +929,8 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         mean, std = summary[metric]
         print(f"  {metric:18s}: {mean:.4f} ± {std:.4f}")
 
+    if return_oof:
+        return summary, oof_artifact
     return summary
 
 def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,

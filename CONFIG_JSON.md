@@ -165,6 +165,23 @@ The ordered sample-ID hashes in `embedding_info` serve a different purpose: they
 document the exact row order of the embedding arrays and are expected to change if
 extraction order changes.
 
+`embedding_info.preprocessing` records the exact model weights, resize/normalization
+settings, and embedding output or pooling rule used by the backend. Its SHA-256 is
+also part of the embedding-cache identity, so a preprocessing change cannot silently
+reuse embeddings produced under an older protocol.
+
+Hugging Face models and their image processors are loaded from the same immutable
+40-character repository commit. The pinned revision is included in the preprocessing
+contract and therefore in both result provenance and embedding-cache identity.
+
+Each primary benchmark run writes compressed out-of-fold classification artifacts
+beneath `<run_folder>/oof/<dataset>/`. Every artifact contains the sample and group
+IDs, zero-based outer-fold assignment, targets, predictions, and class/finding
+probabilities for one adapter. Artifacts are validated for complete one-time sample
+coverage, group isolation, finite probability shapes, and exact reproduction of the
+stored fold metrics. Their SHA-256 hashes and relative paths are recorded in the
+dataset result JSON. Random and permuted baseline repetitions do not emit OOF files.
+
 The primary CheXpert policy maps uncertain Cardiomegaly and Consolidation labels
 to absent and uncertain Atelectasis, Edema, and Pleural Effusion labels to present.
 Unmentioned labels map to absent. The alternative `u_zeros` and `u_ones` settings

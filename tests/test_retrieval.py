@@ -171,9 +171,13 @@ class RetrievalWiringTests(unittest.TestCase):
             return {"recall_at_k": {1: 0.0, 5: 0.0, 10: 0.0}, "map": 0.0}
 
         with (
-            patch.object(benchmark_module, "MLP_cv", return_value=({}, {})),
-            patch.object(benchmark_module, "KNN_cv", return_value={}),
-            patch.object(benchmark_module, "logistic_regression_cv", return_value={}),
+            patch.object(benchmark_module, "MLP_cv", return_value=({}, {}, None)),
+            patch.object(benchmark_module, "KNN_cv", return_value=({}, None)),
+            patch.object(
+                benchmark_module,
+                "logistic_regression_cv",
+                return_value=({}, None),
+            ),
             patch.object(benchmark_module, "retrieval_eval", side_effect=fake_retrieval),
             patch.object(benchmark_module, "clustering_eval", return_value={}),
         ):

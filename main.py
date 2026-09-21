@@ -138,7 +138,7 @@ def main():
     from scripts.dataloading import load_dataset
     from scripts.data_audit import ordered_ids_sha256
     from scripts.models import build_backend
-    from scripts.extraction import extract_embeddings
+    from scripts.extraction import extract_embeddings, preprocessing_fingerprint
     from scripts.label_prior_baseline import run_label_prior_baselines
     from scripts.odir import pool_odir_patient_embeddings
     from scripts.permuted_baseline import run_permuted_baseline
@@ -248,7 +248,9 @@ def main():
             n_splits = outer_folds,
             random_state = evaluation_seed,
             group_col = group_col,
-            sample_ids = evaluation_sample_ids
+            sample_ids = evaluation_sample_ids,
+            oof_output_dir = os.path.join(run_folder, "oof", dataset_name),
+            oof_path_prefix = os.path.join("oof", dataset_name),
         )
 
         emb_array = np.asarray(evaluation_embeddings)
@@ -264,7 +266,9 @@ def main():
                 evaluation_sample_ids
             ),
             "evaluation_unit": contract.evaluation_unit,
-            "source": source
+            "source": source,
+            "preprocessing": backend.preprocessing_spec,
+            "preprocessing_sha256": preprocessing_fingerprint(backend),
         }
         results["data_audit"] = dataloader.data_audit
         results["data_audit"]["evaluation"] = evaluation_audit

@@ -18,9 +18,12 @@ from scripts.permuted_baseline import (
 )
 from scripts.tests import (
     CLASSIFICATION_TUNING_METRIC,
+    _classification_scores,
     _evaluate_classifier,
     _outer_split_iter,
+    _validate_oof_metric_consistency,
 )
+from scripts.oof import OOFAccumulator
 
 
 class _Predictor:
@@ -73,6 +76,41 @@ class ClassificationMetricTests(unittest.TestCase):
                 None,
                 np.asarray(["g1", "g1", "g2", "g2"]),
             )
+
+    def test_oof_artifact_exactly_reproduces_fold_metrics(self):
+        accumulator = OOFAccumulator(
+            "fixture", "logistic_regression",
+            ["s0", "s1", "s2", "s3"],
+            ["g0", "g1", "g2", "g3"],
+            np.asarray([0, 1, 0, 1]),
+            ["negative", "positive"],
+            False,
+        )
+        score_rows = []
+        for fold, indices, scores in (
+            (0, [0, 1], [[0.9, 0.1], [0.2, 0.8]]),
+            (1, [2, 3], [[0.7, 0.3], [0.1, 0.9]]),
+        ):
+            y_true = np.asarray([0, 1])
+            y_pred = np.asarray([0, 1])
+            score_array = np.asarray(scores)
+            accumulator.record(
+                indices, fold, y_true, y_pred, score_array
+            )
+            row = {"fold": fold + 1}
+            row.update(
+                _classification_scores(y_true, y_pred, score_array, False)
+            )
+            score_rows.append(row)
+
+        artifact = accumulator.finalize()
+        self.assertTrue(
+            _validate_oof_metric_consistency(artifact, score_rows, False)
+        )
+
+        score_rows[0]["f1_macro"] -= 0.01
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            _validate_oof_metric_consistency(artifact, score_rows, False)
 
     def test_random_baseline_reads_standardized_knn_score_shape(self):
         result = {
