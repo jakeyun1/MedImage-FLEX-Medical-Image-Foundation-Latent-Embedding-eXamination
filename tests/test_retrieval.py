@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import types
 import unittest
 from types import SimpleNamespace
@@ -14,6 +15,12 @@ if "optuna" not in sys.modules:
     sys.modules["optuna"] = optuna
 
 from scripts.tests import retrieval_eval
+from scripts.retrieval_artifacts import (
+    summary_from_retrieval_artifact,
+    validate_comparable_retrieval_artifacts,
+    validate_retrieval_artifact,
+    write_retrieval_artifact,
+)
 
 
 def _paths(sample_ids):
@@ -44,6 +51,71 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(
             results["evaluation_protocol"]["candidate_exclusion"], "self"
         )
+
+    def test_artifact_preserves_exclusions_and_reconstructs_metrics(self):
+        sample_ids = ["a0.jpg", "a1.jpg", "b0.jpg"]
+        metadata = pd.DataFrame({
+            "image_id": sample_ids,
+            "dx": ["A", "A", "B"],
+        })
+        results, artifact = retrieval_eval(
+            "ham10000",
+            np.asarray([[1.0, 0.0], [0.0, 1.0], [0.9, 0.9]]),
+            metadata,
+            _paths(sample_ids),
+            "image_id",
+            "dx",
+            ks=(1, 2),
+            bootstrap=False,
+            return_artifact=True,
+        )
+
+        self.assertTrue(validate_retrieval_artifact(artifact))
+        self.assertEqual(len(artifact["eligible"]), 3)
+        self.assertEqual(int(np.sum(artifact["eligible"])), 2)
+        excluded = np.flatnonzero(~artifact["eligible"])
+        self.assertEqual(artifact["unit_sample_ids"][excluded].tolist(), ["b0.jpg"])
+        self.assertEqual(
+            artifact["exclusion_reasons"][excluded].tolist(),
+            ["no_relevant_candidate"],
+        )
+        reconstructed = summary_from_retrieval_artifact(artifact)
+        self.assertEqual(reconstructed["n_eval"], results["n_eval"])
+        self.assertEqual(reconstructed["hit_at_k"], results["hit_at_k"])
+        self.assertAlmostEqual(reconstructed["map"], results["map"])
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            metadata_record = write_retrieval_artifact(
+                artifact, results, output_dir, relative_path="retrieval/test/queries.npz"
+            )
+            self.assertEqual(metadata_record["n_units"], 3)
+            self.assertEqual(metadata_record["n_excluded_units"], 1)
+            with np.load(f"{output_dir}/queries.npz", allow_pickle=False) as saved:
+                self.assertTrue(validate_retrieval_artifact(saved))
+
+        second = dict(artifact)
+        second["average_precision"] = artifact["average_precision"].copy()
+        second["average_precision"][artifact["eligible"]] *= 0.9
+        self.assertTrue(validate_comparable_retrieval_artifacts([artifact, second]))
+
+        misaligned = dict(second)
+        misaligned["unit_sample_ids"] = second["unit_sample_ids"].copy()
+        misaligned["unit_sample_ids"][0] = "wrong.jpg"
+        with self.assertRaisesRegex(ValueError, "misaligned"):
+            validate_comparable_retrieval_artifacts([artifact, misaligned])
+
+    def test_artifact_validation_rejects_inconsistent_hit(self):
+        sample_ids = ["a0.jpg", "a1.jpg"]
+        metadata = pd.DataFrame({"image_id": sample_ids, "dx": ["A", "A"]})
+        _, artifact = retrieval_eval(
+            "ham10000", np.eye(2), metadata, _paths(sample_ids),
+            "image_id", "dx", ks=(1,), bootstrap=False, return_artifact=True,
+        )
+        corrupted = dict(artifact)
+        corrupted["hit_at_k"] = artifact["hit_at_k"].copy()
+        corrupted["hit_at_k"][0, 0] = False
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            validate_retrieval_artifact(corrupted)
 
     def test_same_group_candidates_are_completely_excluded(self):
         sample_ids = ["a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg"]
@@ -158,6 +230,23 @@ class RetrievalEvaluationTests(unittest.TestCase):
                 "ham10000", np.eye(2), metadata, _paths(metadata["image_id"]),
                 "image_id", "dx", ks=(0,), bootstrap=False,
             )
+        with self.assertRaisesRegex(ValueError, "unique"):
+            retrieval_eval(
+                "ham10000", np.eye(2), metadata, _paths(metadata["image_id"]),
+                "image_id", "dx", ks=(1, 1), bootstrap=False,
+            )
+
+    def test_disabled_normalization_is_recorded_as_dot_product(self):
+        sample_ids = ["a0.jpg", "a1.jpg"]
+        metadata = pd.DataFrame({"image_id": sample_ids, "dx": ["A", "A"]})
+        results, artifact = retrieval_eval(
+            "ham10000", np.eye(2), metadata, _paths(sample_ids),
+            "image_id", "dx", ks=(1,), normalize=False, bootstrap=False,
+            return_artifact=True,
+        )
+        self.assertEqual(results["evaluation_protocol"]["similarity"], "dot_product")
+        self.assertEqual(artifact["similarity"].item(), "dot_product")
+        self.assertFalse(artifact["normalized"].item())
 
 
 class RetrievalWiringTests(unittest.TestCase):
@@ -168,7 +257,14 @@ class RetrievalWiringTests(unittest.TestCase):
 
         def fake_retrieval(*args, **kwargs):
             captured.update(kwargs)
-            return {"recall_at_k": {1: 0.0, 5: 0.0, 10: 0.0}, "map": 0.0}
+            return (
+                {
+                    "hit_at_k": {1: 0.0, 5: 0.0, 10: 0.0},
+                    "recall_at_k": {1: 0.0, 5: 0.0, 10: 0.0},
+                    "map": 0.0,
+                },
+                None,
+            )
 
         with (
             patch.object(benchmark_module, "MLP_cv", return_value=({}, {}, None)),
@@ -189,6 +285,55 @@ class RetrievalWiringTests(unittest.TestCase):
 
         self.assertEqual(captured["group_col"], "lesion_id")
         self.assertEqual(captured["sample_ids"], ["a.jpg", "b.jpg"])
+        self.assertTrue(captured["return_artifact"])
+
+    def test_run_benchmark_writes_requested_retrieval_artifact(self):
+        import scripts.run_benchmark as benchmark_module
+
+        summary = {
+            "hit_at_k": {1: 1.0, 5: 1.0, 10: 1.0},
+            "recall_at_k": {1: 1.0, 5: 1.0, 10: 1.0},
+            "map": 1.0,
+        }
+        artifact = object()
+        artifact_metadata = {"path": "retrieval/ham10000/queries.npz"}
+        with (
+            patch.object(benchmark_module, "MLP_cv", return_value=({}, {}, None)),
+            patch.object(benchmark_module, "KNN_cv", return_value=({}, None)),
+            patch.object(
+                benchmark_module,
+                "logistic_regression_cv",
+                return_value=({}, None),
+            ),
+            patch.object(
+                benchmark_module,
+                "retrieval_eval",
+                return_value=(summary, artifact),
+            ),
+            patch.object(benchmark_module, "clustering_eval", return_value={}),
+            patch.object(
+                benchmark_module,
+                "write_retrieval_artifact",
+                return_value=artifact_metadata,
+            ) as writer,
+            tempfile.TemporaryDirectory() as output_dir,
+        ):
+            results = benchmark_module.run_benchmark(
+                "ham10000", np.eye(2), pd.DataFrame(), [], "image_id", "dx",
+                sample_ids=["a.jpg", "b.jpg"],
+                retrieval_output_dir=output_dir,
+                retrieval_path_prefix="retrieval/ham10000",
+            )
+
+        writer.assert_called_once_with(
+            artifact,
+            summary,
+            output_dir,
+            filename="queries.npz",
+            relative_path="retrieval/ham10000/queries.npz",
+        )
+        self.assertEqual(results["result_schema_version"], 4)
+        self.assertEqual(results["retrieval_queries"]["artifact"], artifact_metadata)
 
 
 if __name__ == "__main__":

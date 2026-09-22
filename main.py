@@ -251,6 +251,10 @@ def main():
             sample_ids = evaluation_sample_ids,
             oof_output_dir = os.path.join(run_folder, "oof", dataset_name),
             oof_path_prefix = os.path.join("oof", dataset_name),
+            retrieval_output_dir = os.path.join(
+                run_folder, "retrieval", dataset_name
+            ),
+            retrieval_path_prefix = os.path.join("retrieval", dataset_name),
         )
 
         emb_array = np.asarray(evaluation_embeddings)

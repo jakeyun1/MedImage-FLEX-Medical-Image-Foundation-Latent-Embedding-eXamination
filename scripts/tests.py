@@ -32,7 +32,13 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
 
 from scripts.dataset_contracts import DATASET_CONTRACTS, get_dataset_contract
+from scripts.data_audit import ordered_ids_sha256
 from scripts.oof import OOFAccumulator, validate_oof_artifact
+from scripts.retrieval_artifacts import (
+    RETRIEVAL_ARTIFACT_SCHEMA_VERSION,
+    validate_retrieval_artifact,
+    validate_retrieval_summary,
+)
 
 # Silence Optuna's extensive logging
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -936,7 +942,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
 def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                    ks = (1, 5, 10), normalize = True, per_class = False,
                    bootstrap = True, n_bootstrap = 1000, ci = 95, random_state = 42,
-                   group_col = None, sample_ids = None):
+                   group_col = None, sample_ids = None, return_artifact = False):
     """
     Cross-group retrieval using exact-class or per-finding relevance.
 
@@ -951,9 +957,9 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         image_paths : The local paths of all images
         id_col : The name of the column that identifies each unique image
         label_col : The name of the column that contains the diagnosis for each image
-        ks : Iterable of ints, K values for Recall@K
+        ks : Iterable of ints, K values for Hit@K
         normalize : Boolean flag to L2-normalize embeddings
-        per_class : Boolean flag to return per-class Recall@K
+        per_class : Boolean flag to return per-class Hit@K
         bootstrap : Boolean flag to return bootstrap confidence intervals
         n_bootstrap : Number of bootstrap resamples over evaluated queries
         ci : Confidence interval width
@@ -961,7 +967,8 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         group_col : Metadata column identifying patient/lesion groups
 
     Returns:
-        results : JSON-compatible summary of the recall test
+        results : JSON-compatible retrieval summary; when return_artifact is True,
+            returns (results, artifact)
     """
     X, y, classes, is_multilabel, sample_ids = prepare_data_multilabel(
         dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
@@ -974,6 +981,8 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     ks = tuple(int(k) for k in ks)
     if not ks or any(k < 1 for k in ks):
         raise ValueError("Retrieval K values must be positive integers.")
+    if len(set(ks)) != len(ks):
+        raise ValueError("Retrieval K values must be unique.")
     if bootstrap and n_bootstrap < 1:
         raise ValueError("n_bootstrap must be at least 1 when bootstrap is enabled.")
     if not 0 < ci < 100:
@@ -984,7 +993,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     else:
         message = f"{', '.join(str(k) for k in ks[:-1])}, and {ks[-1]}"
 
-    print(f"--- Retrieval evaluation with Recall@{message} ---")
+    print(f"--- Retrieval evaluation with Hit@{message} ---")
 
     # Normalize to make cosine == dot
     if normalize:
@@ -998,7 +1007,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             if group_ids is not None else "self_excluded_all_vs_all_retrieval"
         ),
         "ks": [int(k) for k in ks],
-        "similarity": "cosine",
+        "similarity": "cosine" if normalize else "dot_product",
         "normalized": normalize,
         "relevance": "per_finding" if is_multilabel else "exact_class",
         "aggregation": (
@@ -1032,51 +1041,82 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         precision_at_hits = np.cumsum(relevance)[hits] / (hits + 1)
         return {
             "average_precision": float(np.mean(precision_at_hits)),
-            "recall_at_k": {
+            "first_relevant_rank": int(hits[0] + 1),
+            "hit_at_k": {
                 int(k): bool(np.any(relevance[:k])) for k in ks
             },
         }
 
-    evaluation_units = []
+    all_units = []
     for query_index in range(N):
         candidates = ranked_candidates(query_index)
         if is_multilabel:
             positive_findings = np.flatnonzero(y[query_index] == 1)
             for finding_index in positive_findings:
                 relevance = y[candidates, finding_index] == 1
-                if not np.any(relevance):
-                    continue
-                evaluation_units.append({
+                unit = {
                     "query_index": int(query_index),
                     "group_id": (
                         str(group_ids[query_index])
-                        if group_ids is not None else str(query_index)
+                        if group_ids is not None else str(sample_ids[query_index])
                     ),
                     "label_index": int(finding_index),
-                    **metrics_for_relevance(relevance),
-                })
+                    "n_candidates": int(len(candidates)),
+                    "n_relevant": int(np.sum(relevance)),
+                }
+                if np.any(relevance):
+                    unit.update({"eligible": True, "exclusion_reason": ""})
+                    unit.update(metrics_for_relevance(relevance))
+                else:
+                    unit.update({
+                        "eligible": False,
+                        "exclusion_reason": (
+                            "no_candidates" if len(candidates) == 0
+                            else "no_relevant_candidate"
+                        ),
+                        "average_precision": np.nan,
+                        "first_relevant_rank": -1,
+                        "hit_at_k": {int(k): False for k in ks},
+                    })
+                all_units.append(unit)
         else:
             relevance = y[candidates] == y[query_index]
-            if not np.any(relevance):
-                continue
-            evaluation_units.append({
+            unit = {
                 "query_index": int(query_index),
                 "group_id": (
                     str(group_ids[query_index])
-                    if group_ids is not None else str(query_index)
+                    if group_ids is not None else str(sample_ids[query_index])
                 ),
                 "label_index": int(y[query_index]),
-                **metrics_for_relevance(relevance),
-            })
+                "n_candidates": int(len(candidates)),
+                "n_relevant": int(np.sum(relevance)),
+            }
+            if np.any(relevance):
+                unit.update({"eligible": True, "exclusion_reason": ""})
+                unit.update(metrics_for_relevance(relevance))
+            else:
+                unit.update({
+                    "eligible": False,
+                    "exclusion_reason": (
+                        "no_candidates" if len(candidates) == 0
+                        else "no_relevant_candidate"
+                    ),
+                    "average_precision": np.nan,
+                    "first_relevant_rank": -1,
+                    "hit_at_k": {int(k): False for k in ks},
+                })
+            all_units.append(unit)
+
+    evaluation_units = [unit for unit in all_units if unit["eligible"]]
 
     valid_query_indices = {unit["query_index"] for unit in evaluation_units}
     n_eval = len(valid_query_indices)
 
     def aggregate_units(units):
         return {
-            "recall_at_k": {
+            "hit_at_k": {
                 int(k): float(np.mean([
-                    unit["recall_at_k"][int(k)] for unit in units
+                    unit["hit_at_k"][int(k)] for unit in units
                 ]))
                 for k in ks
             },
@@ -1085,18 +1125,75 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             ])),
         }
 
+    def build_artifact():
+        query_indices = np.asarray(
+            [unit["query_index"] for unit in all_units], dtype=np.int64
+        )
+        artifact = {
+            "schema_version": np.asarray(
+                RETRIEVAL_ARTIFACT_SCHEMA_VERSION, dtype=np.int64
+            ),
+            "dataset_name": np.asarray(str(dataset_name)),
+            "label_type": np.asarray("multilabel" if is_multilabel else "multiclass"),
+            "similarity": np.asarray(protocol["similarity"]),
+            "normalized": np.asarray(bool(normalize)),
+            "candidate_exclusion": np.asarray(protocol["candidate_exclusion"]),
+            "classes": np.asarray([str(value) for value in classes], dtype=str),
+            "ks": np.asarray(ks, dtype=np.int64),
+            "sample_ids": np.asarray(sample_ids, dtype=str),
+            "group_ids": np.asarray(
+                sample_ids if group_ids is None else group_ids, dtype=str
+            ),
+            "unit_query_indices": query_indices,
+            "unit_sample_ids": np.asarray(sample_ids, dtype=str)[query_indices],
+            "unit_group_ids": np.asarray(
+                [unit["group_id"] for unit in all_units], dtype=str
+            ),
+            "unit_label_indices": np.asarray(
+                [unit["label_index"] for unit in all_units], dtype=np.int64
+            ),
+            "eligible": np.asarray(
+                [unit["eligible"] for unit in all_units], dtype=bool
+            ),
+            "exclusion_reasons": np.asarray(
+                [unit["exclusion_reason"] for unit in all_units], dtype=str
+            ),
+            "n_candidates": np.asarray(
+                [unit["n_candidates"] for unit in all_units], dtype=np.int64
+            ),
+            "n_relevant": np.asarray(
+                [unit["n_relevant"] for unit in all_units], dtype=np.int64
+            ),
+            "first_relevant_rank": np.asarray(
+                [unit["first_relevant_rank"] for unit in all_units], dtype=np.int64
+            ),
+            "average_precision": np.asarray(
+                [unit["average_precision"] for unit in all_units], dtype=np.float64
+            ),
+            "hit_at_k": np.asarray([
+                [unit["hit_at_k"][int(k)] for k in ks] for unit in all_units
+            ], dtype=bool).reshape(len(all_units), len(ks)),
+            "ordered_sample_ids_sha256": np.asarray(
+                ordered_ids_sha256([str(value) for value in sample_ids])
+            ),
+        }
+        validate_retrieval_artifact(artifact)
+        return artifact
+
     if not evaluation_units:
-        return {
+        empty_hit_at_k = {int(k): np.nan for k in ks}
+        results = {
             "n_total": N,
             "n_eval": 0,
             "n_excluded_queries": N,
             "n_evaluation_units": 0,
-            "recall_at_k": {int(k): np.nan for k in ks},
+            "hit_at_k": empty_hit_at_k,
+            "recall_at_k": dict(empty_hit_at_k),
             "map": np.nan,
             "classes": classes,
             "evaluation_protocol": protocol,
             "protocol": {
-                "similarity": "cosine",
+                "similarity": protocol["similarity"],
                 "normalized": normalize,
                 "relevance": protocol["relevance"],
                 "candidate_exclusion": protocol["candidate_exclusion"],
@@ -1104,9 +1201,12 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             },
             "note": "No query has a relevant candidate outside its excluded group.",
         }
+        artifact = build_artifact()
+        validate_retrieval_summary(artifact, results)
+        return (results, artifact) if return_artifact else results
 
     aggregate = aggregate_units(evaluation_units)
-    recall_at_k = aggregate["recall_at_k"]
+    hit_at_k = aggregate["hit_at_k"]
     mAP = aggregate["map"]
 
     # JSON compatible
@@ -1115,12 +1215,14 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         "n_eval": n_eval,
         "n_excluded_queries": int(N - n_eval),
         "n_evaluation_units": int(len(evaluation_units)),
-        "recall_at_k": recall_at_k,
+        "hit_at_k": hit_at_k,
+        # Deprecated compatibility alias. This metric is success/Hit@K, not recall.
+        "recall_at_k": dict(hit_at_k),
         "map": mAP,
         "classes": classes,
         "evaluation_protocol": protocol,
         "protocol": {
-            "similarity": "cosine",
+            "similarity": protocol["similarity"],
             "normalized": normalize,
             "relevance": protocol["relevance"],
             "candidate_exclusion": protocol["candidate_exclusion"],
@@ -1145,6 +1247,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                     "n_total_queries": total_queries,
                     "n_queries": 0,
                     "n_excluded_queries": total_queries,
+                    "hit_at_k": {int(k): np.nan for k in ks},
                     "recall_at_k": {int(k): np.nan for k in ks},
                     "map": np.nan,
                 }
@@ -1156,17 +1259,21 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 "n_excluded_queries": total_queries - len(finding_units),
                 **finding_metrics,
             }
+            per_finding[str(label_name)]["recall_at_k"] = dict(
+                finding_metrics["hit_at_k"]
+            )
         populated_findings = [
             metrics for metrics in per_finding.values()
             if metrics["n_queries"] > 0
         ]
         results["per_finding"] = per_finding
-        results["macro_recall_at_k"] = {
+        results["macro_hit_at_k"] = {
             int(k): float(np.mean([
-                metrics["recall_at_k"][int(k)] for metrics in populated_findings
+                metrics["hit_at_k"][int(k)] for metrics in populated_findings
             ]))
             for k in ks
         }
+        results["macro_recall_at_k"] = dict(results["macro_hit_at_k"])
         results["macro_map"] = float(np.mean([
             metrics["map"] for metrics in populated_findings
         ]))
@@ -1174,7 +1281,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     if bootstrap:
         rng = np.random.default_rng(random_state)
         alpha = (100 - ci) / 2
-        boot_recall = {int(K): [] for K in ks}
+        boot_hit = {int(K): [] for K in ks}
         boot_map = []
 
         units_by_bootstrap_key = {}
@@ -1197,16 +1304,16 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             ]
             sampled_metrics = aggregate_units(sampled_units)
             for k in ks:
-                boot_recall[int(k)].append(
-                    sampled_metrics["recall_at_k"][int(k)]
+                boot_hit[int(k)].append(
+                    sampled_metrics["hit_at_k"][int(k)]
                 )
             boot_map.append(sampled_metrics["map"])
 
         results["confidence_intervals"] = {
-            "recall_at_k": {
+            "hit_at_k": {
                 int(K): [
-                    float(np.nanpercentile(boot_recall[int(K)], alpha)),
-                    float(np.nanpercentile(boot_recall[int(K)], 100 - alpha))
+                    float(np.nanpercentile(boot_hit[int(K)], alpha)),
+                    float(np.nanpercentile(boot_hit[int(K)], 100 - alpha))
                 ]
                 for K in ks
             },
@@ -1215,8 +1322,11 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 float(np.nanpercentile(boot_map, 100 - alpha))
             ]
         }
+        results["confidence_intervals"]["recall_at_k"] = dict(
+            results["confidence_intervals"]["hit_at_k"]
+        )
 
-    # Optional per-class Recall@K for multiclass datasets.
+    # Optional per-class Hit@K for multiclass datasets.
     if per_class and not is_multilabel:
         per_cls = {}
         for class_index, class_name in enumerate(classes):
@@ -1226,22 +1336,26 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 continue
             per_cls[str(class_name)] = {
                 int(k): float(np.mean([
-                    unit["recall_at_k"][int(k)] for unit in class_units
+                    unit["hit_at_k"][int(k)] for unit in class_units
                 ]))
                 for k in ks
             }
+        results["hit_at_k_per_class"] = per_cls
         results["recall_at_k_per_class"] = per_cls
 
     # Print summary
     print(
-        f"Retrieval (cross-group, cosine) — evaluated {n_eval}/{N} queries "
+        f"Retrieval (cross-group, {protocol['similarity']}) — evaluated "
+        f"{n_eval}/{N} queries "
         f"across {len(evaluation_units)} relevance units."
     )
     for K in ks:
-        print(f"  Recall@{K}: {recall_at_k[int(K)]:.4f}")
+        print(f"  Hit@{K}: {hit_at_k[int(K)]:.4f}")
     print(f"  mAP      : {mAP:.4f}")
 
-    return results
+    artifact = build_artifact()
+    validate_retrieval_summary(artifact, results)
+    return (results, artifact) if return_artifact else results
 
 def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                     k_range = range(2, 15), random_state = 42,

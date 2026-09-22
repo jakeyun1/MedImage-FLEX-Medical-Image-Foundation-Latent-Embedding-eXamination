@@ -35,9 +35,9 @@ HEADLINE_METRICS = (
     ("logreg_cv", "f1_weighted"),
     ("logreg_cv", "precision_weighted"),
     ("logreg_cv", "roc_auc"),
-    ("retrieval", "recall_at_k", "1"),
-    ("retrieval", "recall_at_k", "5"),
-    ("retrieval", "recall_at_k", "10"),
+    ("retrieval", "hit_at_k", "1"),
+    ("retrieval", "hit_at_k", "5"),
+    ("retrieval", "hit_at_k", "10"),
     ("retrieval", "map"),
     ("clustering", "class_count_k", "ARI"),
     ("clustering", "class_count_k", "NMI"),
@@ -123,7 +123,7 @@ def aggregate_benchmark_results(results, seeds):
 
 
 def _validate_cached_result(result, expected, manifest_info):
-    if result.get("result_schema_version") != 3:
+    if result.get("result_schema_version") != 4:
         raise ValueError(
             "Cached random baseline uses an incompatible result schema; "
             "rerun it with overwrite enabled."

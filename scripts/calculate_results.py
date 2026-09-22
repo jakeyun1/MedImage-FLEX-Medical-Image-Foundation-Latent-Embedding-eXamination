@@ -20,7 +20,7 @@ TASK_MAP = {"pad_ufes": "Skin lesions",
             "cbis_ddsm": "Mammograms",
             "chexpert": "Chest radiographs"}
 
-METRICS_MAP = {"Retrieval": ["recall@5", "map"],
+METRICS_MAP = {"Retrieval": ["hit@5", "map"],
                "Clustering": "nmi"}
 
 def compute_classification_averages(json_list):
@@ -68,7 +68,7 @@ def compute_classification_averages(json_list):
     for file in json_list:
         with open(file, "r") as f:
             dataset_results = json.load(f)
-        if dataset_results.get("result_schema_version") != 3:
+        if dataset_results.get("result_schema_version") != 4:
             raise ValueError(
                 f"{file} uses an incompatible result schema; regenerate its results."
             )
@@ -104,17 +104,17 @@ def compute_classification_averages(json_list):
         
 def compute_retrieval_averages(json_list):
     """
-    Calculates the average Recall@5 and average mAP across the
+    Calculates the average Hit@5 and average mAP across the
     used datasets.
 
     Sample output:
     {
-        "recall@5": [0.783, 0.04],
+        "hit@5": [0.783, 0.04],
         "map": [0.239, 0.04]
     }
 
-    retrieval_results["recall@5"][0] is the mean Recall@5 score, retrieval_results["recall@5"][1]
-    is the std. dev. of the Recall@5 score
+    retrieval_results["hit@5"][0] is the mean Hit@5 score, retrieval_results["hit@5"][1]
+    is the std. dev. of the Hit@5 score
 
     mAP follows this pattern.
 
@@ -135,8 +135,8 @@ def compute_retrieval_averages(json_list):
             dataset_results = json.load(f)
         
         # WARNING: accumulator indices are hardcoded due to dataset results JSON structure
-        # Recall@5
-        accumulator[0].append(dataset_results["retrieval"]["recall_at_k"]["5"])
+        # Hit@5
+        accumulator[0].append(dataset_results["retrieval"]["hit_at_k"]["5"])
 
         # mAP
         accumulator[1].append(dataset_results["retrieval"]["map"])
@@ -264,7 +264,7 @@ output = {}
 
 # Obtain results for the types of adapters
 classification_results = compute_classification_averages(json_list) # F1 score
-retrieval_results = compute_retrieval_averages(json_list) # Recall@5, mAP
+retrieval_results = compute_retrieval_averages(json_list) # Hit@5, mAP
 clustering_results = compute_clustering_averages(json_list) # NMI
 
 output["Classification"] = classification_results
