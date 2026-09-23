@@ -183,7 +183,8 @@ def validate_retrieval_summary(artifact, summary):
         if int(summary[key]) != reconstructed[key]:
             raise ValueError(f"Retrieval artifact does not reproduce summary field '{key}'.")
     for k, value in reconstructed["hit_at_k"].items():
-        observed = summary["hit_at_k"][k]
+        hit_at_k = summary["hit_at_k"]
+        observed = hit_at_k[k] if k in hit_at_k else hit_at_k[str(k)]
         if not np.allclose(observed, value, equal_nan=True, rtol=0, atol=1e-12):
             raise ValueError(f"Retrieval artifact does not reproduce Hit@{k}.")
     if not np.allclose(summary["map"], reconstructed["map"], equal_nan=True, rtol=0, atol=1e-12):

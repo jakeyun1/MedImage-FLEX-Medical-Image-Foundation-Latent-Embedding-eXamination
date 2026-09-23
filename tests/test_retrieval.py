@@ -1,3 +1,4 @@
+import json
 import sys
 import tempfile
 import types
@@ -19,6 +20,7 @@ from scripts.retrieval_artifacts import (
     summary_from_retrieval_artifact,
     validate_comparable_retrieval_artifacts,
     validate_retrieval_artifact,
+    validate_retrieval_summary,
     write_retrieval_artifact,
 )
 
@@ -83,6 +85,8 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(reconstructed["n_eval"], results["n_eval"])
         self.assertEqual(reconstructed["hit_at_k"], results["hit_at_k"])
         self.assertAlmostEqual(reconstructed["map"], results["map"])
+        json_results = json.loads(json.dumps(results))
+        self.assertTrue(validate_retrieval_summary(artifact, json_results))
 
         with tempfile.TemporaryDirectory() as output_dir:
             metadata_record = write_retrieval_artifact(
