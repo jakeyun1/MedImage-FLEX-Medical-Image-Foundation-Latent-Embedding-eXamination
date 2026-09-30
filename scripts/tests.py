@@ -957,9 +957,9 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         image_paths : The local paths of all images
         id_col : The name of the column that identifies each unique image
         label_col : The name of the column that contains the diagnosis for each image
-        ks : Iterable of ints, K values for Hit@K
+        ks : Iterable of ints, K values for Hit@K and Recall@K
         normalize : Boolean flag to L2-normalize embeddings
-        per_class : Boolean flag to return per-class Hit@K
+        per_class : Boolean flag to return per-class Hit@K and Recall@K
         bootstrap : Boolean flag to return bootstrap confidence intervals
         n_bootstrap : Number of bootstrap resamples over evaluated queries
         ci : Confidence interval width
@@ -993,7 +993,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     else:
         message = f"{', '.join(str(k) for k in ks[:-1])}, and {ks[-1]}"
 
-    print(f"--- Retrieval evaluation with Hit@{message} ---")
+    print(f"--- Retrieval evaluation with Hit/Recall@{message} ---")
 
     # Normalize to make cosine == dot
     if normalize:
@@ -1039,11 +1039,19 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     def metrics_for_relevance(relevance):
         hits = np.flatnonzero(relevance)
         precision_at_hits = np.cumsum(relevance)[hits] / (hits + 1)
+        n_relevant = int(len(hits))
+        n_relevant_at_k = {
+            int(k): int(np.sum(relevance[:k])) for k in ks
+        }
         return {
             "average_precision": float(np.mean(precision_at_hits)),
             "first_relevant_rank": int(hits[0] + 1),
+            "n_relevant_at_k": n_relevant_at_k,
             "hit_at_k": {
-                int(k): bool(np.any(relevance[:k])) for k in ks
+                int(k): n_relevant_at_k[int(k)] > 0 for k in ks
+            },
+            "recall_at_k": {
+                int(k): n_relevant_at_k[int(k)] / n_relevant for k in ks
             },
         }
 
@@ -1076,7 +1084,9 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                         ),
                         "average_precision": np.nan,
                         "first_relevant_rank": -1,
+                        "n_relevant_at_k": {int(k): 0 for k in ks},
                         "hit_at_k": {int(k): False for k in ks},
+                        "recall_at_k": {int(k): np.nan for k in ks},
                     })
                 all_units.append(unit)
         else:
@@ -1103,7 +1113,9 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                     ),
                     "average_precision": np.nan,
                     "first_relevant_rank": -1,
+                    "n_relevant_at_k": {int(k): 0 for k in ks},
                     "hit_at_k": {int(k): False for k in ks},
+                    "recall_at_k": {int(k): np.nan for k in ks},
                 })
             all_units.append(unit)
 
@@ -1117,6 +1129,12 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "hit_at_k": {
                 int(k): float(np.mean([
                     unit["hit_at_k"][int(k)] for unit in units
+                ]))
+                for k in ks
+            },
+            "recall_at_k": {
+                int(k): float(np.mean([
+                    unit["recall_at_k"][int(k)] for unit in units
                 ]))
                 for k in ks
             },
@@ -1170,6 +1188,10 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "average_precision": np.asarray(
                 [unit["average_precision"] for unit in all_units], dtype=np.float64
             ),
+            "n_relevant_at_k": np.asarray([
+                [unit["n_relevant_at_k"][int(k)] for k in ks]
+                for unit in all_units
+            ], dtype=np.int64).reshape(len(all_units), len(ks)),
             "hit_at_k": np.asarray([
                 [unit["hit_at_k"][int(k)] for k in ks] for unit in all_units
             ], dtype=bool).reshape(len(all_units), len(ks)),
@@ -1207,6 +1229,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
 
     aggregate = aggregate_units(evaluation_units)
     hit_at_k = aggregate["hit_at_k"]
+    recall_at_k = aggregate["recall_at_k"]
     mAP = aggregate["map"]
 
     # JSON compatible
@@ -1216,8 +1239,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         "n_excluded_queries": int(N - n_eval),
         "n_evaluation_units": int(len(evaluation_units)),
         "hit_at_k": hit_at_k,
-        # Deprecated compatibility alias. This metric is success/Hit@K, not recall.
-        "recall_at_k": dict(hit_at_k),
+        "recall_at_k": recall_at_k,
         "map": mAP,
         "classes": classes,
         "evaluation_protocol": protocol,
@@ -1259,9 +1281,6 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 "n_excluded_queries": total_queries - len(finding_units),
                 **finding_metrics,
             }
-            per_finding[str(label_name)]["recall_at_k"] = dict(
-                finding_metrics["hit_at_k"]
-            )
         populated_findings = [
             metrics for metrics in per_finding.values()
             if metrics["n_queries"] > 0
@@ -1273,7 +1292,12 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             ]))
             for k in ks
         }
-        results["macro_recall_at_k"] = dict(results["macro_hit_at_k"])
+        results["macro_recall_at_k"] = {
+            int(k): float(np.mean([
+                metrics["recall_at_k"][int(k)] for metrics in populated_findings
+            ]))
+            for k in ks
+        }
         results["macro_map"] = float(np.mean([
             metrics["map"] for metrics in populated_findings
         ]))
@@ -1282,6 +1306,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         rng = np.random.default_rng(random_state)
         alpha = (100 - ci) / 2
         boot_hit = {int(K): [] for K in ks}
+        boot_recall = {int(K): [] for K in ks}
         boot_map = []
 
         units_by_bootstrap_key = {}
@@ -1307,6 +1332,9 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 boot_hit[int(k)].append(
                     sampled_metrics["hit_at_k"][int(k)]
                 )
+                boot_recall[int(k)].append(
+                    sampled_metrics["recall_at_k"][int(k)]
+                )
             boot_map.append(sampled_metrics["map"])
 
         results["confidence_intervals"] = {
@@ -1317,31 +1345,40 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                 ]
                 for K in ks
             },
+            "recall_at_k": {
+                int(K): [
+                    float(np.nanpercentile(boot_recall[int(K)], alpha)),
+                    float(np.nanpercentile(boot_recall[int(K)], 100 - alpha))
+                ]
+                for K in ks
+            },
             "map": [
                 float(np.nanpercentile(boot_map, alpha)),
                 float(np.nanpercentile(boot_map, 100 - alpha))
             ]
         }
-        results["confidence_intervals"]["recall_at_k"] = dict(
-            results["confidence_intervals"]["hit_at_k"]
-        )
 
-    # Optional per-class Hit@K for multiclass datasets.
+    # Optional per-class Hit@K and Recall@K for multiclass datasets.
     if per_class and not is_multilabel:
-        per_cls = {}
+        hit_per_cls = {}
+        recall_per_cls = {}
         for class_index, class_name in enumerate(classes):
             class_units = units_by_label[class_index]
             if not class_units:
-                per_cls[str(class_name)] = {int(k): np.nan for k in ks}
+                empty = {int(k): np.nan for k in ks}
+                hit_per_cls[str(class_name)] = empty
+                recall_per_cls[str(class_name)] = dict(empty)
                 continue
-            per_cls[str(class_name)] = {
+            class_metrics = aggregate_units(class_units)
+            hit_per_cls[str(class_name)] = {
                 int(k): float(np.mean([
                     unit["hit_at_k"][int(k)] for unit in class_units
                 ]))
                 for k in ks
             }
-        results["hit_at_k_per_class"] = per_cls
-        results["recall_at_k_per_class"] = per_cls
+            recall_per_cls[str(class_name)] = class_metrics["recall_at_k"]
+        results["hit_at_k_per_class"] = hit_per_cls
+        results["recall_at_k_per_class"] = recall_per_cls
 
     # Print summary
     print(
@@ -1351,6 +1388,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     )
     for K in ks:
         print(f"  Hit@{K}: {hit_at_k[int(K)]:.4f}")
+        print(f"  Recall@{K}: {recall_at_k[int(K)]:.4f}")
     print(f"  mAP      : {mAP:.4f}")
 
     artifact = build_artifact()

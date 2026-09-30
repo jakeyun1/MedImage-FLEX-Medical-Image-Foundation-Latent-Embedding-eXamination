@@ -84,6 +84,7 @@ class RetrievalEvaluationTests(unittest.TestCase):
         reconstructed = summary_from_retrieval_artifact(artifact)
         self.assertEqual(reconstructed["n_eval"], results["n_eval"])
         self.assertEqual(reconstructed["hit_at_k"], results["hit_at_k"])
+        self.assertEqual(reconstructed["recall_at_k"], results["recall_at_k"])
         self.assertAlmostEqual(reconstructed["map"], results["map"])
         json_results = json.loads(json.dumps(results))
         self.assertTrue(validate_retrieval_summary(artifact, json_results))
@@ -121,6 +122,43 @@ class RetrievalEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "disagree"):
             validate_retrieval_artifact(corrupted)
 
+    def test_recall_at_k_counts_all_relevant_candidates(self):
+        sample_ids = ["a0.jpg", "a1.jpg", "a2.jpg", "a3.jpg"]
+        metadata = pd.DataFrame({"image_id": sample_ids, "dx": ["A"] * 4})
+        results, artifact = retrieval_eval(
+            "ham10000", np.eye(4), metadata, _paths(sample_ids),
+            "image_id", "dx", ks=(1, 3), bootstrap=True,
+            n_bootstrap=10, per_class=True, return_artifact=True,
+        )
+
+        self.assertEqual(results["hit_at_k"], {1: 1.0, 3: 1.0})
+        self.assertAlmostEqual(results["recall_at_k"][1], 1 / 3)
+        self.assertEqual(results["recall_at_k"][3], 1.0)
+        self.assertEqual(results["confidence_intervals"]["hit_at_k"][1], [1.0, 1.0])
+        self.assertEqual(
+            results["confidence_intervals"]["recall_at_k"][1],
+            [1 / 3, 1 / 3],
+        )
+        self.assertAlmostEqual(results["hit_at_k_per_class"]["A"][1], 1.0)
+        self.assertAlmostEqual(results["recall_at_k_per_class"]["A"][1], 1 / 3)
+        self.assertEqual(artifact["schema_version"].item(), 2)
+        np.testing.assert_array_equal(
+            artifact["n_relevant_at_k"],
+            np.tile(np.asarray([1, 3]), (4, 1)),
+        )
+
+        corrupted = dict(artifact)
+        corrupted["n_relevant_at_k"] = artifact["n_relevant_at_k"].copy()
+        corrupted["n_relevant_at_k"][0, 0] = 0
+        with self.assertRaisesRegex(ValueError, "disagree"):
+            validate_retrieval_artifact(corrupted)
+
+        bad_summary = dict(results)
+        bad_summary["recall_at_k"] = dict(results["recall_at_k"])
+        bad_summary["recall_at_k"][1] = 1.0
+        with self.assertRaisesRegex(ValueError, "Recall@1"):
+            validate_retrieval_summary(artifact, bad_summary)
+
     def test_same_group_candidates_are_completely_excluded(self):
         sample_ids = ["a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg"]
         metadata = pd.DataFrame({
@@ -145,7 +183,9 @@ class RetrievalEvaluationTests(unittest.TestCase):
             group_col="lesion_id",
         )
 
-        self.assertAlmostEqual(unrestricted["recall_at_k"][1], 2 / 3)
+        self.assertAlmostEqual(unrestricted["hit_at_k"][1], 2 / 3)
+        self.assertAlmostEqual(unrestricted["recall_at_k"][1], 1 / 3)
+        self.assertEqual(group_excluded["hit_at_k"][1], 0.0)
         self.assertEqual(group_excluded["recall_at_k"][1], 0.0)
         self.assertEqual(group_excluded["n_eval"], 3)
         self.assertEqual(
@@ -336,7 +376,7 @@ class RetrievalWiringTests(unittest.TestCase):
             filename="queries.npz",
             relative_path="retrieval/ham10000/queries.npz",
         )
-        self.assertEqual(results["result_schema_version"], 4)
+        self.assertEqual(results["result_schema_version"], 5)
         self.assertEqual(results["retrieval_queries"]["artifact"], artifact_metadata)
 
 

@@ -137,7 +137,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
 
     # Compile the results
     results = {
-        "result_schema_version": 4,
+        "result_schema_version": 5,
         "dataset_info": dataset_info,
         "mlp_cv": mlp_summary,
         "knn_cv": knn_summary,

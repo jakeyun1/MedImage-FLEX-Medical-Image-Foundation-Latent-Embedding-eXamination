@@ -117,12 +117,13 @@ class ClassificationMetricTests(unittest.TestCase):
             "mlp_cv": {"f1_macro": [0.4, 0.1]},
             "knn_cv": {"f1_macro": [0.5, 0.2]},
             "logreg_cv": {"f1_macro": [0.6, 0.3]},
-            "retrieval": {},
+            "retrieval": {"recall_at_k": {5: 0.25}},
             "clustering": {},
         }
         summary = aggregate_benchmark_results([result], [42])
 
         self.assertEqual(summary["metrics"]["knn_cv.f1_macro"]["mean"], 0.5)
+        self.assertEqual(summary["metrics"]["retrieval.recall_at_k.5"]["mean"], 0.25)
 
     def test_legacy_baseline_result_schemas_are_rejected(self):
         for validator in (validate_random_cache, validate_permuted_cache):

@@ -182,6 +182,17 @@ coverage, group isolation, finite probability shapes, and exact reproduction of 
 stored fold metrics. Their SHA-256 hashes and relative paths are recorded in the
 dataset result JSON. Random and permuted baseline repetitions do not emit OOF files.
 
+Retrieval reports Hit@K and Recall@K as distinct metrics. Hit@K is the fraction of
+eligible query-label units with at least one relevant candidate in the first K
+positions. Recall@K is the mean, over those same units, of the number of relevant
+candidates in the first K positions divided by all relevant candidates remaining
+after self/same-group exclusion. The retrieval artifact stores the per-unit
+relevant-at-K counts so both metrics can be reconstructed and validated independently.
+Multilabel retrieval uses one unit per positive query-finding pair; multiclass
+retrieval uses one unit per eligible query. Result schema version 5 and retrieval
+artifact schema version 2 introduce true Recall@K, so older cached outputs must be
+regenerated before comparison or aggregation.
+
 The primary CheXpert policy maps uncertain Cardiomegaly and Consolidation labels
 to absent and uncertain Atelectasis, Edema, and Pleural Effusion labels to present.
 Unmentioned labels map to absent. The alternative `u_zeros` and `u_ones` settings

@@ -9,7 +9,7 @@ import numpy as np
 from scripts.data_audit import ordered_ids_sha256
 
 
-RETRIEVAL_ARTIFACT_SCHEMA_VERSION = 1
+RETRIEVAL_ARTIFACT_SCHEMA_VERSION = 2
 
 
 def _scalar(artifact, key):
@@ -43,7 +43,8 @@ def validate_retrieval_artifact(artifact):
         "classes", "ks", "sample_ids", "group_ids", "unit_query_indices",
         "unit_sample_ids", "unit_group_ids", "unit_label_indices", "eligible",
         "exclusion_reasons", "n_candidates", "n_relevant", "first_relevant_rank",
-        "average_precision", "hit_at_k", "ordered_sample_ids_sha256",
+        "average_precision", "n_relevant_at_k", "hit_at_k",
+        "ordered_sample_ids_sha256",
     )
     for key in required:
         if key not in artifact:
@@ -63,6 +64,7 @@ def validate_retrieval_artifact(artifact):
     n_relevant = np.asarray(artifact["n_relevant"])
     first_rank = np.asarray(artifact["first_relevant_rank"])
     average_precision = np.asarray(artifact["average_precision"], dtype=np.float64)
+    n_relevant_at_k = np.asarray(artifact["n_relevant_at_k"])
     hit_at_k = np.asarray(artifact["hit_at_k"])
 
     if classes.ndim != 1 or len(classes) < 1:
@@ -92,6 +94,13 @@ def validate_retrieval_artifact(artifact):
         raise ValueError("Retrieval indices and counts must use integer dtypes.")
     if eligible.dtype != np.bool_:
         raise ValueError("Retrieval eligibility must use a boolean dtype.")
+    if (
+        n_relevant_at_k.shape != (n_units, len(ks))
+        or not np.issubdtype(n_relevant_at_k.dtype, np.integer)
+    ):
+        raise ValueError(
+            "Retrieval relevant-at-K counts must be an aligned integer matrix."
+        )
     if hit_at_k.shape != (n_units, len(ks)) or hit_at_k.dtype != np.bool_:
         raise ValueError("Retrieval Hit@K values must be an aligned boolean matrix.")
 
@@ -134,9 +143,35 @@ def validate_retrieval_artifact(artifact):
         raise ValueError("Eligible first-relevant ranks are invalid.")
     if np.any(first_rank[~eligible] != -1):
         raise ValueError("Excluded first-relevant ranks must be -1.")
+    max_relevant_at_k = np.minimum(
+        n_relevant[:, None], np.minimum(ks[None, :], n_candidates[:, None])
+    )
+    if np.any(n_relevant_at_k < 0) or np.any(n_relevant_at_k > max_relevant_at_k):
+        raise ValueError("Retrieval relevant-at-K counts are invalid.")
+    if np.any(n_relevant_at_k[~eligible] != 0):
+        raise ValueError("Excluded retrieval units must have zero relevant-at-K counts.")
+    sorted_k_indices = np.argsort(ks)
+    if len(ks) > 1 and np.any(
+        np.diff(n_relevant_at_k[:, sorted_k_indices], axis=1) < 0
+    ):
+        raise ValueError("Retrieval relevant-at-K counts must be monotonic in K.")
+    covers_all_candidates = ks[None, :] >= n_candidates[:, None]
+    expected_full_counts = np.broadcast_to(
+        n_relevant[:, None], n_relevant_at_k.shape
+    )
+    if np.any(
+        n_relevant_at_k[covers_all_candidates]
+        != expected_full_counts[covers_all_candidates]
+    ):
+        raise ValueError(
+            "Retrieval relevant-at-K counts must include every relevant candidate "
+            "when K covers the candidate set."
+        )
     expected_hits = eligible[:, None] & (first_rank[:, None] <= ks[None, :])
     if not np.array_equal(hit_at_k, expected_hits):
         raise ValueError("Hit@K values disagree with first-relevant ranks.")
+    if not np.array_equal(hit_at_k, n_relevant_at_k > 0):
+        raise ValueError("Hit@K values disagree with relevant-at-K counts.")
 
     expected_hash = ordered_ids_sha256(sample_ids.tolist())
     if str(_scalar(artifact, "ordered_sample_ids_sha256")) != expected_hash:
@@ -150,6 +185,8 @@ def summary_from_retrieval_artifact(artifact):
     eligible = np.asarray(artifact["eligible"], dtype=bool)
     ks = np.asarray(artifact["ks"], dtype=np.int64)
     hits = np.asarray(artifact["hit_at_k"], dtype=bool)
+    n_relevant_at_k = np.asarray(artifact["n_relevant_at_k"], dtype=np.int64)
+    n_relevant = np.asarray(artifact["n_relevant"], dtype=np.int64)
     average_precision = np.asarray(artifact["average_precision"], dtype=np.float64)
     query_indices = np.asarray(artifact["unit_query_indices"], dtype=np.int64)
     n_samples = len(np.asarray(artifact["sample_ids"]))
@@ -160,6 +197,7 @@ def summary_from_retrieval_artifact(artifact):
             "n_excluded_queries": n_samples,
             "n_evaluation_units": 0,
             "hit_at_k": {int(k): np.nan for k in ks},
+            "recall_at_k": {int(k): np.nan for k in ks},
             "map": np.nan,
         }
     evaluated_queries = np.unique(query_indices[eligible])
@@ -170,6 +208,12 @@ def summary_from_retrieval_artifact(artifact):
         "n_evaluation_units": int(np.sum(eligible)),
         "hit_at_k": {
             int(k): float(np.mean(hits[eligible, index]))
+            for index, k in enumerate(ks)
+        },
+        "recall_at_k": {
+            int(k): float(np.mean(
+                n_relevant_at_k[eligible, index] / n_relevant[eligible]
+            ))
             for index, k in enumerate(ks)
         },
         "map": float(np.mean(average_precision[eligible])),
@@ -187,6 +231,11 @@ def validate_retrieval_summary(artifact, summary):
         observed = hit_at_k[k] if k in hit_at_k else hit_at_k[str(k)]
         if not np.allclose(observed, value, equal_nan=True, rtol=0, atol=1e-12):
             raise ValueError(f"Retrieval artifact does not reproduce Hit@{k}.")
+    for k, value in reconstructed["recall_at_k"].items():
+        recall_at_k = summary["recall_at_k"]
+        observed = recall_at_k[k] if k in recall_at_k else recall_at_k[str(k)]
+        if not np.allclose(observed, value, equal_nan=True, rtol=0, atol=1e-12):
+            raise ValueError(f"Retrieval artifact does not reproduce Recall@{k}.")
     if not np.allclose(summary["map"], reconstructed["map"], equal_nan=True, rtol=0, atol=1e-12):
         raise ValueError("Retrieval artifact does not reproduce mAP.")
     return True
