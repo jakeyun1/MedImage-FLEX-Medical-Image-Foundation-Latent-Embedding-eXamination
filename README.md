@@ -29,6 +29,28 @@ python main.py --config ./model_config.json --num-workers 2
 
 **NOTE: Any personal access tokens or keys for models must be loaded locally**
 
+## Model-specific backends
+
+BiomedCLIP, CXR Foundation, and Med-Flamingo use dedicated callable backends rather
+than the generic Hugging Face backend. This prevents model-specific checkpoints or
+token grids from being silently treated as one image embedding.
+
+- `biomedclip` requires `open_clip_torch==2.23.0`. Its checkpoint and native
+  validation transform are pinned by the backend.
+- `cxr-foundation` requires the `cxr-foundation` Python package, accepted access to
+  `google/cxr-foundation`, and an exact gated repository commit in
+  `MEDIMAGE_FLEX_CXR_FOUNDATION_REVISION`. It uses the general image embedding and
+  mean-pools its image tokens.
+- `medflamingo` (alias `med-flamingo/med-flamingo`) requires the official
+  Med-Flamingo environment, including `open-flamingo==0.0.2`, and the local
+  Llama-7B v1 directory in `MEDIMAGE_FLEX_MEDFLAMINGO_LLAMA_PATH`. It extracts the
+  medically trained Perceiver output and mean-pools its 64 latent tokens.
+
+`MEDIMAGE_FLEX_HF_CACHE_DIR` can optionally select the Hugging Face cache used by
+CXR Foundation and Med-Flamingo. These heavyweight optional packages are not
+installed by the default setup because their framework requirements differ and the
+models are intended to run in their corresponding HPC environments.
+
 ## Dataset protocol
 
 Dataset downloads are pinned to explicit Kaggle versions. Exact-content duplicate

@@ -86,6 +86,53 @@ class EmbeddingBackend(ABC):
         """
         pass
 
+
+class CallableEmbeddingBackend(EmbeddingBackend):
+    """Adapt one model-specific embedding callable to the shared backend contract."""
+
+    def __init__(
+        self,
+        model_id,
+        device,
+        transform,
+        encode_fn,
+        embedding_dim,
+        preprocessing_spec,
+    ):
+        super().__init__(model_id, device, preprocessing_spec)
+        if transform is not None and not callable(transform):
+            raise TypeError("transform must be callable or None.")
+        if not callable(encode_fn):
+            raise TypeError("encode_fn must be callable.")
+        if not isinstance(embedding_dim, int) or embedding_dim <= 0:
+            raise ValueError("embedding_dim must be a positive integer.")
+        self.transform = transform
+        self.encode_fn = encode_fn
+        self._embedding_dim = embedding_dim
+
+    def get_transform(self):
+        return self.transform
+
+    @torch.inference_mode()
+    def encode_batch(self, images):
+        embeddings = self.encode_fn(images)
+        if not isinstance(embeddings, torch.Tensor):
+            embeddings = torch.as_tensor(embeddings)
+        embeddings = _require_matrix(
+            embeddings,
+            f"{self.model_id} embedding output",
+        )
+        if embeddings.shape[-1] != self._embedding_dim:
+            raise ValueError(
+                f"{self.model_id} declared embedding dimension "
+                f"{self._embedding_dim}, but returned {embeddings.shape[-1]}."
+            )
+        return embeddings
+
+    @property
+    def embedding_dim(self):
+        return self._embedding_dim
+
 class TorchvisionBackend(EmbeddingBackend):
     def __init__(self, model_id, model, device, transform, preprocessing_spec,
                  target_size = [224, 224]):

@@ -11,13 +11,18 @@ import sys
 
 
 PACKAGE_DISTRIBUTIONS = {
+    "cxr_foundation": ("cxr-foundation",),
+    "huggingface_hub": ("huggingface-hub",),
     "kagglehub": ("kagglehub",),
     "numpy": ("numpy",),
     "optuna": ("optuna",),
+    "open_clip": ("open_clip_torch",),
+    "open_flamingo": ("open-flamingo",),
     "pandas": ("pandas",),
     "pillow": ("pillow",),
     "scikit_learn": ("scikit-learn",),
     "tensorflow": ("tensorflow", "tensorflow-cpu"),
+    "tensorflow_hub": ("tensorflow-hub",),
     "torch": ("torch",),
     "torchvision": ("torchvision",),
     "transformers": ("transformers",),
