@@ -7,12 +7,13 @@ Executes the testbench.
 import os
 import json
 import argparse
+from copy import deepcopy
 import numpy as np
 from datetime import datetime
 from time import perf_counter
 
 from scripts.dataset_contracts import get_dataset_contract
-from scripts.provenance import build_run_provenance
+from scripts.provenance import build_dataset_fingerprint, build_run_provenance
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|", "_"]
 
@@ -87,6 +88,13 @@ def main():
     chexpert_uncertainty_policy = cfg["dataset"].get(
         "chexpert_uncertainty_policy", "finding_specific"
     )
+    chexpert_sensitivity_policies = cfg["dataset"].get(
+        "chexpert_sensitivity_policies",
+        [
+            policy for policy in ("finding_specific", "u_zeros", "u_ones")
+            if policy != chexpert_uncertainty_policy
+        ],
+    )
 
     normalize_embeddings = cfg.get("normalize_embeddings", True)
     cache_embeddings = cfg.get("cache_embeddings", False)
@@ -135,7 +143,11 @@ def main():
         num_workers = max(0, num_workers)
 
     # Load dependecies once JSON file is parsed
-    from scripts.dataloading import load_dataset
+    from scripts.dataloading import (
+        _apply_chexpert_uncertainty_policy,
+        load_dataset,
+        validate_chexpert_uncertainty_policies,
+    )
     from scripts.data_audit import ordered_ids_sha256
     from scripts.models import build_backend
     from scripts.extraction import extract_embeddings, preprocessing_fingerprint
@@ -145,6 +157,12 @@ def main():
     from scripts.random_baseline import run_random_baseline
     from scripts.reproducibility import prepare_experiment_manifest, sample_ids_from_paths
     from scripts.run_benchmark import run_benchmark
+
+    chexpert_uncertainty_policy, chexpert_sensitivity_policies = (
+        validate_chexpert_uncertainty_policies(
+            chexpert_uncertainty_policy, chexpert_sensitivity_policies
+        )
+    )
 
     print(f"\n=== Running Benchmark: {model_name} ===")
     print(f"Model: {model_id}")
@@ -286,6 +304,89 @@ def main():
         # Save results
         results_path = os.path.join(run_folder, f"{dataset_name}.json")
         write_json(results, results_path)
+
+        if dataset_name == "chexpert":
+            primary_ids = evaluation_metadata[id_col].astype(str).tolist()
+            primary_groups = evaluation_metadata[group_col].astype(str).tolist()
+            for policy in chexpert_sensitivity_policies:
+                sensitivity_start = perf_counter()
+                sensitivity_metadata, policy_audit = (
+                    _apply_chexpert_uncertainty_policy(
+                        evaluation_metadata, policy
+                    )
+                )
+                sensitivity_ids = sensitivity_metadata[id_col].astype(str).tolist()
+                sensitivity_groups = sensitivity_metadata[group_col].astype(str).tolist()
+                if sensitivity_ids != primary_ids:
+                    raise ValueError(
+                        f"CheXpert sensitivity {policy!r} changed the cohort or its order."
+                    )
+                if sensitivity_groups != primary_groups:
+                    raise ValueError(
+                        f"CheXpert sensitivity {policy!r} changed patient groups."
+                    )
+
+                sensitivity_results = run_benchmark(
+                    dataset_name,
+                    evaluation_embeddings,
+                    sensitivity_metadata,
+                    evaluation_paths,
+                    id_col=id_col,
+                    label_col=label_col,
+                    outer_folds=fold_assignments,
+                    n_splits=outer_folds,
+                    random_state=evaluation_seed,
+                    group_col=group_col,
+                    sample_ids=evaluation_sample_ids,
+                    oof_output_dir=os.path.join(
+                        run_folder, "oof", "chexpert_sensitivity", policy
+                    ),
+                    oof_path_prefix=os.path.join(
+                        "oof", "chexpert_sensitivity", policy
+                    ),
+                    retrieval_output_dir=os.path.join(
+                        run_folder, "retrieval", "chexpert_sensitivity", policy
+                    ),
+                    retrieval_path_prefix=os.path.join(
+                        "retrieval", "chexpert_sensitivity", policy
+                    ),
+                )
+                label_fingerprint = build_dataset_fingerprint(
+                    sensitivity_ids,
+                    sensitivity_groups,
+                    sensitivity_metadata[label_col].tolist(),
+                )
+                sensitivity_results["embedding_info"] = deepcopy(
+                    results["embedding_info"]
+                )
+                sensitivity_results["data_audit"] = deepcopy(results["data_audit"])
+                sensitivity_results["data_audit"]["sensitivity_evaluation"] = {
+                    "policy": policy_audit,
+                    "fingerprint": label_fingerprint,
+                }
+                sensitivity_results["reproducibility"] = deepcopy(manifest_info)
+                sensitivity_results["run_provenance"] = run_provenance
+                sensitivity_results["sensitivity_analysis"] = {
+                    "primary_uncertainty_policy": chexpert_uncertainty_policy,
+                    "uncertainty_policy": policy,
+                    "matched_cohort": True,
+                    "matched_patient_groups": True,
+                    "matched_outer_folds": True,
+                    "reused_embeddings": True,
+                    "label_fingerprint": label_fingerprint,
+                }
+                sensitivity_results["runtime"]["stages"][
+                    "total_sensitivity_run"
+                ] = perf_counter() - sensitivity_start
+
+                sensitivity_dir = os.path.join(
+                    run_folder, "chexpert_sensitivity"
+                )
+                os.makedirs(sensitivity_dir, exist_ok=True)
+                write_json(
+                    sensitivity_results,
+                    os.path.join(sensitivity_dir, f"{policy}.json"),
+                )
 
         if run_random_embeddings:
             run_random_baseline(

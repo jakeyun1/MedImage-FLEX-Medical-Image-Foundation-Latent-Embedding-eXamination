@@ -6,6 +6,7 @@ import pandas as pd
 from scripts.dataloading import (
     CHEXPERT_LABELS,
     _apply_chexpert_uncertainty_policy,
+    validate_chexpert_uncertainty_policies,
 )
 
 
@@ -30,6 +31,8 @@ class ChexpertPolicyTests(unittest.TestCase):
         self.assertEqual(
             audit["source_view_counts"], {"Frontal": 1, "Lateral": 1}
         )
+        self.assertEqual(result.loc[0, "Cardiomegaly"], -1)
+        self.assertTrue(np.isnan(result.loc[1, "Cardiomegaly"]))
 
     def test_sensitivity_policies(self):
         zeros, _ = _apply_chexpert_uncertainty_policy(self.metadata, "u_zeros")
@@ -40,6 +43,24 @@ class ChexpertPolicyTests(unittest.TestCase):
     def test_unknown_policy_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "uncertainty policy"):
             _apply_chexpert_uncertainty_policy(self.metadata, "guess")
+
+    def test_sensitivity_policy_configuration_is_strict(self):
+        self.assertEqual(
+            validate_chexpert_uncertainty_policies(
+                "finding_specific", ["u_zeros", "u_ones"]
+            ),
+            ("finding_specific", ("u_zeros", "u_ones")),
+        )
+        with self.assertRaisesRegex(ValueError, "JSON list"):
+            validate_chexpert_uncertainty_policies("finding_specific", "u_zeros")
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            validate_chexpert_uncertainty_policies(
+                "finding_specific", ["u_zeros", "u_zeros"]
+            )
+        with self.assertRaisesRegex(ValueError, "cannot also"):
+            validate_chexpert_uncertainty_policies(
+                "finding_specific", ["finding_specific"]
+            )
 
 
 if __name__ == "__main__":

@@ -5,11 +5,23 @@ import os
 import tempfile
 
 import numpy as np
+from sklearn.metrics import f1_score
 
 from scripts.data_audit import ordered_ids_sha256
 
 
 OOF_SCHEMA_VERSION = 1
+
+
+def pooled_macro_f1_from_oof(artifact):
+    """Reconstruct the primary classification endpoint from validated OOF rows."""
+    validate_oof_artifact(artifact)
+    return float(f1_score(
+        np.asarray(artifact["y_true"]),
+        np.asarray(artifact["y_pred"]),
+        average="macro",
+        zero_division=0,
+    ))
 
 
 class OOFAccumulator:

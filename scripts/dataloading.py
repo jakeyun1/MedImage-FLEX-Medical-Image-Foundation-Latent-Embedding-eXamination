@@ -38,6 +38,33 @@ CHEXPERT_FINDING_SPECIFIC_POLICY = {
     "Consolidation": 0,
     "Atelectasis": 1,
 }
+CHEXPERT_UNCERTAINTY_POLICIES = (
+    "finding_specific",
+    "u_zeros",
+    "u_ones",
+)
+
+
+def validate_chexpert_uncertainty_policies(primary, sensitivities):
+    """Validate one primary policy and an optional set of matched sensitivities."""
+    valid = set(CHEXPERT_UNCERTAINTY_POLICIES)
+    if not isinstance(primary, str) or primary not in valid:
+        raise ValueError(
+            "CheXpert uncertainty policy must be one of "
+            f"{sorted(valid)}; found {primary!r}."
+        )
+    if not isinstance(sensitivities, list):
+        raise ValueError("chexpert_sensitivity_policies must be a JSON list.")
+    if any(not isinstance(policy, str) for policy in sensitivities):
+        raise ValueError("CheXpert sensitivity policies must be strings.")
+    if len(sensitivities) != len(set(sensitivities)):
+        raise ValueError("chexpert_sensitivity_policies must not contain duplicates.")
+    unknown = sorted(set(sensitivities) - valid)
+    if unknown:
+        raise ValueError(f"Unknown CheXpert sensitivity policies: {unknown}.")
+    if primary in sensitivities:
+        raise ValueError("The primary CheXpert policy cannot also be a sensitivity.")
+    return primary, tuple(sensitivities)
 
 
 def _read_metadata(csv_paths, contract):
@@ -191,7 +218,7 @@ def _apply_exclusion_policy(contract, metadata_df, image_paths):
 
 
 def _apply_chexpert_uncertainty_policy(metadata_df, policy_name):
-    valid_policies = {"finding_specific", "u_zeros", "u_ones"}
+    valid_policies = set(CHEXPERT_UNCERTAINTY_POLICIES)
     if policy_name not in valid_policies:
         raise ValueError(
             "CheXpert uncertainty policy must be one of "
@@ -217,7 +244,6 @@ def _apply_chexpert_uncertainty_policy(metadata_df, policy_name):
     processed = processed.fillna(0).astype(int)
 
     result = metadata_df.copy()
-    result[list(CHEXPERT_LABELS)] = processed
     result["Diagnosis"] = processed.to_numpy().tolist()
     audit = {
         "uncertainty_policy": policy_name,

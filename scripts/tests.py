@@ -33,9 +33,14 @@ from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, s
 
 from scripts.dataset_contracts import DATASET_CONTRACTS, get_dataset_contract
 from scripts.data_audit import ordered_ids_sha256
-from scripts.oof import OOFAccumulator, validate_oof_artifact
+from scripts.oof import (
+    OOFAccumulator,
+    pooled_macro_f1_from_oof,
+    validate_oof_artifact,
+)
 from scripts.retrieval_artifacts import (
     RETRIEVAL_ARTIFACT_SCHEMA_VERSION,
+    summary_from_retrieval_artifact,
     validate_retrieval_artifact,
     validate_retrieval_summary,
 )
@@ -591,6 +596,7 @@ def MLP_cv(dataset_name, embeddings, metadata_df, image_paths, id_col,
         oof_artifact, fold_score_rows, is_multilabel
     )
     summary = _summarize_fold_scores(fold_scores)
+    summary["pooled_oof_f1_macro"] = pooled_macro_f1_from_oof(oof_artifact)
     summary["classes"] = classes
     summary["best_params"] = _most_common_params(best_params_by_fold)
     summary["best_params_by_fold"] = best_params_by_fold
@@ -742,6 +748,7 @@ def KNN_cv(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col
         oof_artifact, fold_score_rows, is_multilabel
     )
     score_summary = _summarize_fold_scores(fold_scores)
+    score_summary["pooled_oof_f1_macro"] = pooled_macro_f1_from_oof(oof_artifact)
     best_params = _most_common_params(best_params_by_fold)
 
     summary = dict(score_summary)
@@ -903,6 +910,7 @@ def logistic_regression_cv(dataset_name, embeddings, metadata_df, image_paths, i
         oof_artifact, fold_score_rows, is_multilabel
     )
     summary = _summarize_fold_scores(fold_scores)
+    summary["pooled_oof_f1_macro"] = pooled_macro_f1_from_oof(oof_artifact)
     summary["classes"] = classes
     summary["best_params"] = _most_common_params(best_params_by_fold)
     summary["best_params_by_fold"] = best_params_by_fold
@@ -1013,6 +1021,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         "aggregation": (
             "micro_over_query_finding_pairs" if is_multilabel else "queries"
         ),
+        "primary_aggregation": "macro_over_labels",
         "candidate_exclusion": (
             "self_and_same_group" if group_ids is not None else "self"
         ),
@@ -1224,6 +1233,14 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "note": "No query has a relevant candidate outside its excluded group.",
         }
         artifact = build_artifact()
+        results.update({
+            key: value
+            for key, value in summary_from_retrieval_artifact(artifact).items()
+            if key in {
+                "map", "query_micro_map", "label_macro_map", "macro_map",
+                "label_macro_hit_at_k", "label_macro_recall_at_k", "per_label",
+            }
+        })
         validate_retrieval_summary(artifact, results)
         return (results, artifact) if return_artifact else results
 
@@ -1308,6 +1325,7 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
         boot_hit = {int(K): [] for K in ks}
         boot_recall = {int(K): [] for K in ks}
         boot_map = []
+        boot_label_macro_map = []
 
         units_by_bootstrap_key = {}
         for unit in evaluation_units:
@@ -1336,6 +1354,21 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
                     sampled_metrics["recall_at_k"][int(k)]
                 )
             boot_map.append(sampled_metrics["map"])
+            sampled_label_maps = []
+            for label_index, original_units in units_by_label.items():
+                if not original_units:
+                    continue
+                sampled_label_units = [
+                    unit for unit in sampled_units
+                    if unit["label_index"] == label_index
+                ]
+                if not sampled_label_units:
+                    sampled_label_maps = [np.nan]
+                    break
+                sampled_label_maps.append(
+                    aggregate_units(sampled_label_units)["map"]
+                )
+            boot_label_macro_map.append(float(np.mean(sampled_label_maps)))
 
         results["confidence_intervals"] = {
             "hit_at_k": {
@@ -1355,7 +1388,15 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
             "map": [
                 float(np.nanpercentile(boot_map, alpha)),
                 float(np.nanpercentile(boot_map, 100 - alpha))
-            ]
+            ],
+            "query_micro_map": [
+                float(np.nanpercentile(boot_map, alpha)),
+                float(np.nanpercentile(boot_map, 100 - alpha))
+            ],
+            "label_macro_map": [
+                float(np.nanpercentile(boot_label_macro_map, alpha)),
+                float(np.nanpercentile(boot_label_macro_map, 100 - alpha))
+            ],
         }
 
     # Optional per-class Hit@K and Recall@K for multiclass datasets.
@@ -1392,6 +1433,14 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
     print(f"  mAP      : {mAP:.4f}")
 
     artifact = build_artifact()
+    results.update({
+        key: value
+        for key, value in summary_from_retrieval_artifact(artifact).items()
+        if key in {
+            "map", "query_micro_map", "label_macro_map", "macro_map",
+            "label_macro_hit_at_k", "label_macro_recall_at_k", "per_label",
+        }
+    })
     validate_retrieval_summary(artifact, results)
     return (results, artifact) if return_artifact else results
 

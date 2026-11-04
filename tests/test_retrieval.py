@@ -109,6 +109,33 @@ class RetrievalEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "misaligned"):
             validate_comparable_retrieval_artifacts([artifact, misaligned])
 
+    def test_label_macro_map_is_primary_and_query_micro_map_is_retained(self):
+        sample_ids = ["a0.jpg", "a1.jpg", "a2.jpg", "b0.jpg", "b1.jpg"]
+        metadata = pd.DataFrame({
+            "image_id": sample_ids,
+            "dx": ["A", "A", "A", "B", "B"],
+        })
+        embeddings = np.asarray([
+            [1.0, 0.0], [1.0, 0.01], [1.0, -0.01],
+            [0.9, 0.1], [-1.0, 0.0],
+        ])
+        results, artifact = retrieval_eval(
+            "ham10000", embeddings, metadata, _paths(sample_ids),
+            "image_id", "dx", ks=(1,), bootstrap=False, return_artifact=True,
+        )
+
+        expected_macro = np.mean([
+            results["per_label"]["A"]["map"],
+            results["per_label"]["B"]["map"],
+        ])
+        self.assertAlmostEqual(results["label_macro_map"], expected_macro)
+        self.assertAlmostEqual(results["macro_map"], expected_macro)
+        self.assertAlmostEqual(results["query_micro_map"], results["map"])
+        self.assertNotAlmostEqual(
+            results["label_macro_map"], results["query_micro_map"]
+        )
+        self.assertTrue(validate_retrieval_summary(artifact, results))
+
     def test_artifact_validation_rejects_inconsistent_hit(self):
         sample_ids = ["a0.jpg", "a1.jpg"]
         metadata = pd.DataFrame({"image_id": sample_ids, "dx": ["A", "A"]})
@@ -138,6 +165,9 @@ class RetrievalEvaluationTests(unittest.TestCase):
         self.assertEqual(
             results["confidence_intervals"]["recall_at_k"][1],
             [1 / 3, 1 / 3],
+        )
+        self.assertEqual(
+            results["confidence_intervals"]["label_macro_map"], [1.0, 1.0]
         )
         self.assertAlmostEqual(results["hit_at_k_per_class"]["A"][1], 1.0)
         self.assertAlmostEqual(results["recall_at_k_per_class"]["A"][1], 1 / 3)
@@ -376,7 +406,7 @@ class RetrievalWiringTests(unittest.TestCase):
             filename="queries.npz",
             relative_path="retrieval/ham10000/queries.npz",
         )
-        self.assertEqual(results["result_schema_version"], 5)
+        self.assertEqual(results["result_schema_version"], 6)
         self.assertEqual(results["retrieval_queries"]["artifact"], artifact_metadata)
 
 

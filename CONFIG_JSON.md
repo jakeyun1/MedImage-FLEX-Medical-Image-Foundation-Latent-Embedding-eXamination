@@ -30,7 +30,14 @@
 
         "chexpert_uncertainty_policy": CheXpert uncertain-label policy. One of
                        "finding_specific" (primary), "u_zeros", or "u_ones"
-                       (optional, default is "finding_specific")
+                       (optional, default is "finding_specific"),
+
+        "chexpert_sensitivity_policies": Additional CheXpert policies to run on
+                       the exact primary cohort, patient groups, folds, and
+                       embeddings. Values must be unique, valid, and different
+                       from the primary policy
+                       (optional, default is every non-primary policy; for the
+                       default primary this is ["u_zeros", "u_ones"])
     },
 
     "normalize_embeddings": Flag for normalizing embeddings (optional, default is true),
@@ -124,6 +131,11 @@
     }
 }
 ```
+
+CheXpert sensitivity results are saved as
+`<run_folder>/chexpert_sensitivity/<policy>.json`, with matched OOF and retrieval
+artifacts under their corresponding `chexpert_sensitivity/<policy>/` directories.
+They reuse the primary cohort manifest, outer folds, and extracted embeddings.
 
 When enabled, baseline results are saved beneath
 `<run_folder>/random_baseline/<dataset>/`. Each seed has a full benchmark JSON,

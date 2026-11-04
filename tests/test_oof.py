@@ -6,6 +6,7 @@ import numpy as np
 
 from scripts.oof import (
     OOFAccumulator,
+    pooled_macro_f1_from_oof,
     validate_oof_artifact,
     write_oof_artifact,
 )
@@ -77,6 +78,26 @@ class OOFArtifactTests(unittest.TestCase):
         accumulator = self._multiclass_accumulator()
         with self.assertRaisesRegex(ValueError, "sum to one"):
             accumulator.record([0], 0, [0], [0], [[0.9, 0.9]])
+
+    def test_pooled_macro_f1_is_reconstructed_from_all_oof_predictions(self):
+        accumulator = OOFAccumulator(
+            "fixture", "logistic_regression",
+            [f"s{i}" for i in range(6)],
+            [f"g{i}" for i in range(6)],
+            np.asarray([0, 0, 0, 0, 1, 1]),
+            ["negative", "positive"],
+            False,
+        )
+        accumulator.record(
+            [0, 1], 0, [0, 0], [0, 0], [[0.9, 0.1], [0.8, 0.2]]
+        )
+        accumulator.record(
+            [2, 3, 4, 5], 1, [0, 0, 1, 1], [0, 0, 0, 1],
+            [[0.8, 0.2], [0.7, 0.3], [0.6, 0.4], [0.1, 0.9]],
+        )
+        artifact = accumulator.finalize()
+
+        self.assertAlmostEqual(pooled_macro_f1_from_oof(artifact), 7 / 9)
 
     def test_group_spanning_outer_folds_is_rejected(self):
         accumulator = OOFAccumulator(

@@ -112,17 +112,19 @@ class ClassificationMetricTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "does not match"):
             _validate_oof_metric_consistency(artifact, score_rows, False)
 
-    def test_random_baseline_reads_standardized_knn_score_shape(self):
+    def test_random_baseline_reads_primary_pooled_knn_score(self):
         result = {
-            "mlp_cv": {"f1_macro": [0.4, 0.1]},
-            "knn_cv": {"f1_macro": [0.5, 0.2]},
-            "logreg_cv": {"f1_macro": [0.6, 0.3]},
+            "mlp_cv": {"pooled_oof_f1_macro": 0.4},
+            "knn_cv": {"pooled_oof_f1_macro": 0.5},
+            "logreg_cv": {"pooled_oof_f1_macro": 0.6},
             "retrieval": {"recall_at_k": {5: 0.25}},
             "clustering": {},
         }
         summary = aggregate_benchmark_results([result], [42])
 
-        self.assertEqual(summary["metrics"]["knn_cv.f1_macro"]["mean"], 0.5)
+        self.assertEqual(
+            summary["metrics"]["knn_cv.pooled_oof_f1_macro"]["mean"], 0.5
+        )
         self.assertEqual(summary["metrics"]["retrieval.recall_at_k.5"]["mean"], 0.25)
 
     def test_legacy_baseline_result_schemas_are_rejected(self):

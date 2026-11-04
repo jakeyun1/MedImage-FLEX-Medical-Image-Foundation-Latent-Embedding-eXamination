@@ -68,22 +68,22 @@ def compute_classification_averages(json_list):
     for file in json_list:
         with open(file, "r") as f:
             dataset_results = json.load(f)
-        if dataset_results.get("result_schema_version") != 5:
+        if dataset_results.get("result_schema_version") != 6:
             raise ValueError(
                 f"{file} uses an incompatible result schema; regenerate its results."
             )
         
         # WARNING: accumulator indices are hardcoded due to dataset results JSON structure
         # MLP
-        f1_accumulator[0].append(dataset_results["mlp_cv"]["f1_macro"][0])
+        f1_accumulator[0].append(dataset_results["mlp_cv"]["pooled_oof_f1_macro"])
         mauc_accumulator[0].append(dataset_results["mlp_cv"]["roc_auc"][0])
 
         # KNN
-        f1_accumulator[1].append(dataset_results["knn_cv"]["f1_macro"][0])
+        f1_accumulator[1].append(dataset_results["knn_cv"]["pooled_oof_f1_macro"])
         mauc_accumulator[1].append(dataset_results["knn_cv"]["roc_auc"][0])
 
         # LR
-        f1_accumulator[2].append(dataset_results["logreg_cv"]["f1_macro"][0])
+        f1_accumulator[2].append(dataset_results["logreg_cv"]["pooled_oof_f1_macro"])
         mauc_accumulator[2].append(dataset_results["logreg_cv"]["roc_auc"][0])
 
     # Compute averages and std devs
@@ -134,7 +134,7 @@ def compute_retrieval_averages(json_list):
     for file in json_list:
         with open(file, "r") as f:
             dataset_results = json.load(f)
-        if dataset_results.get("result_schema_version") != 5:
+        if dataset_results.get("result_schema_version") != 6:
             raise ValueError(
                 f"{file} uses an incompatible result schema; regenerate its results."
             )
@@ -147,7 +147,7 @@ def compute_retrieval_averages(json_list):
         accumulator[1].append(dataset_results["retrieval"]["recall_at_k"]["5"])
 
         # mAP
-        accumulator[2].append(dataset_results["retrieval"]["map"])
+        accumulator[2].append(dataset_results["retrieval"]["label_macro_map"])
 
     # Compute averages and std devs
     for idx in range(len(accumulator)):

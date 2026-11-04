@@ -17,21 +17,21 @@ HEADLINE_METRICS = (
     ("mlp_cv", "accuracy"),
     ("mlp_cv", "exact_match_accuracy"),
     ("mlp_cv", "balanced_accuracy"),
-    ("mlp_cv", "f1_macro"),
+    ("mlp_cv", "pooled_oof_f1_macro"),
     ("mlp_cv", "f1_weighted"),
     ("mlp_cv", "precision_weighted"),
     ("mlp_cv", "roc_auc"),
     ("knn_cv", "accuracy"),
     ("knn_cv", "exact_match_accuracy"),
     ("knn_cv", "balanced_accuracy"),
-    ("knn_cv", "f1_macro"),
+    ("knn_cv", "pooled_oof_f1_macro"),
     ("knn_cv", "f1_weighted"),
     ("knn_cv", "precision_weighted"),
     ("knn_cv", "roc_auc"),
     ("logreg_cv", "accuracy"),
     ("logreg_cv", "exact_match_accuracy"),
     ("logreg_cv", "balanced_accuracy"),
-    ("logreg_cv", "f1_macro"),
+    ("logreg_cv", "pooled_oof_f1_macro"),
     ("logreg_cv", "f1_weighted"),
     ("logreg_cv", "precision_weighted"),
     ("logreg_cv", "roc_auc"),
@@ -41,7 +41,7 @@ HEADLINE_METRICS = (
     ("retrieval", "recall_at_k", "1"),
     ("retrieval", "recall_at_k", "5"),
     ("retrieval", "recall_at_k", "10"),
-    ("retrieval", "map"),
+    ("retrieval", "label_macro_map"),
     ("clustering", "class_count_k", "ARI"),
     ("clustering", "class_count_k", "NMI"),
     ("clustering", "class_count_k", "Silhouette"),
@@ -126,7 +126,7 @@ def aggregate_benchmark_results(results, seeds):
 
 
 def _validate_cached_result(result, expected, manifest_info):
-    if result.get("result_schema_version") != 5:
+    if result.get("result_schema_version") != 6:
         raise ValueError(
             "Cached random baseline uses an incompatible result schema; "
             "rerun it with overwrite enabled."

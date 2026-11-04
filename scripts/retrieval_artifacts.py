@@ -182,6 +182,7 @@ def validate_retrieval_artifact(artifact):
 def summary_from_retrieval_artifact(artifact):
     """Reconstruct headline metrics solely from eligible saved units."""
     validate_retrieval_artifact(artifact)
+    classes = np.asarray(artifact["classes"]).astype(str)
     eligible = np.asarray(artifact["eligible"], dtype=bool)
     ks = np.asarray(artifact["ks"], dtype=np.int64)
     hits = np.asarray(artifact["hit_at_k"], dtype=bool)
@@ -189,35 +190,77 @@ def summary_from_retrieval_artifact(artifact):
     n_relevant = np.asarray(artifact["n_relevant"], dtype=np.int64)
     average_precision = np.asarray(artifact["average_precision"], dtype=np.float64)
     query_indices = np.asarray(artifact["unit_query_indices"], dtype=np.int64)
+    label_indices = np.asarray(artifact["unit_label_indices"], dtype=np.int64)
     n_samples = len(np.asarray(artifact["sample_ids"]))
-    if not np.any(eligible):
-        return {
-            "n_total": n_samples,
-            "n_eval": 0,
-            "n_excluded_queries": n_samples,
-            "n_evaluation_units": 0,
-            "hit_at_k": {int(k): np.nan for k in ks},
-            "recall_at_k": {int(k): np.nan for k in ks},
-            "map": np.nan,
-        }
     evaluated_queries = np.unique(query_indices[eligible])
-    return {
+
+    per_label = {}
+    populated = []
+    for label_index, label_name in enumerate(classes):
+        label_mask = eligible & (label_indices == label_index)
+        label_summary = {
+            "n_total_queries": int(np.sum(label_indices == label_index)),
+            "n_queries": int(np.sum(label_mask)),
+            "n_excluded_queries": int(np.sum(
+                (label_indices == label_index) & ~eligible
+            )),
+            "hit_at_k": {
+                int(k): float(np.mean(hits[label_mask, index]))
+                if np.any(label_mask) else np.nan
+                for index, k in enumerate(ks)
+            },
+            "recall_at_k": {
+                int(k): float(np.mean(
+                    n_relevant_at_k[label_mask, index] / n_relevant[label_mask]
+                )) if np.any(label_mask) else np.nan
+                for index, k in enumerate(ks)
+            },
+            "map": float(np.mean(average_precision[label_mask]))
+            if np.any(label_mask) else np.nan,
+        }
+        per_label[str(label_name)] = label_summary
+        if np.any(label_mask):
+            populated.append(label_summary)
+
+    query_micro_map = (
+        float(np.mean(average_precision[eligible])) if np.any(eligible) else np.nan
+    )
+    label_macro_map = (
+        float(np.mean([row["map"] for row in populated]))
+        if populated else np.nan
+    )
+    result = {
         "n_total": n_samples,
         "n_eval": int(len(evaluated_queries)),
         "n_excluded_queries": int(n_samples - len(evaluated_queries)),
         "n_evaluation_units": int(np.sum(eligible)),
         "hit_at_k": {
-            int(k): float(np.mean(hits[eligible, index]))
+            int(k): float(np.mean(hits[eligible, index])) if np.any(eligible) else np.nan
             for index, k in enumerate(ks)
         },
         "recall_at_k": {
             int(k): float(np.mean(
                 n_relevant_at_k[eligible, index] / n_relevant[eligible]
-            ))
+            )) if np.any(eligible) else np.nan
             for index, k in enumerate(ks)
         },
-        "map": float(np.mean(average_precision[eligible])),
+        "map": query_micro_map,
+        "query_micro_map": query_micro_map,
+        "label_macro_map": label_macro_map,
+        "macro_map": label_macro_map,
+        "label_macro_hit_at_k": {
+            int(k): float(np.mean([row["hit_at_k"][int(k)] for row in populated]))
+            if populated else np.nan
+            for k in ks
+        },
+        "label_macro_recall_at_k": {
+            int(k): float(np.mean([row["recall_at_k"][int(k)] for row in populated]))
+            if populated else np.nan
+            for k in ks
+        },
+        "per_label": per_label,
     }
+    return result
 
 
 def validate_retrieval_summary(artifact, summary):
@@ -236,8 +279,21 @@ def validate_retrieval_summary(artifact, summary):
         observed = recall_at_k[k] if k in recall_at_k else recall_at_k[str(k)]
         if not np.allclose(observed, value, equal_nan=True, rtol=0, atol=1e-12):
             raise ValueError(f"Retrieval artifact does not reproduce Recall@{k}.")
-    if not np.allclose(summary["map"], reconstructed["map"], equal_nan=True, rtol=0, atol=1e-12):
-        raise ValueError("Retrieval artifact does not reproduce mAP.")
+    for key in ("map", "query_micro_map", "label_macro_map", "macro_map"):
+        if key not in summary or not np.allclose(
+            summary[key], reconstructed[key], equal_nan=True, rtol=0, atol=1e-12
+        ):
+            raise ValueError(f"Retrieval artifact does not reproduce '{key}'.")
+    for metric in ("label_macro_hit_at_k", "label_macro_recall_at_k"):
+        if metric not in summary:
+            raise ValueError(f"Retrieval summary is missing '{metric}'.")
+        for k, value in reconstructed[metric].items():
+            observed = summary[metric]
+            observed = observed[k] if k in observed else observed[str(k)]
+            if not np.allclose(observed, value, equal_nan=True, rtol=0, atol=1e-12):
+                raise ValueError(
+                    f"Retrieval artifact does not reproduce {metric} at K={k}."
+                )
     return True
 
 

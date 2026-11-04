@@ -166,6 +166,12 @@ def run_label_prior_baselines(
             prediction_seeds.append(int(prediction_seed))
 
         strategy_result = _summarize_fold_scores(fold_scores)
+        strategy_result["pooled_oof_f1_macro"] = float(f1_score(
+            np.concatenate(y_true_parts),
+            np.concatenate(y_pred_parts),
+            average="macro",
+            zero_division=0,
+        ))
         strategy_result["fold_scores"] = fold_scores
         strategy_result["per_class"] = _per_class_metrics(
             np.concatenate(y_true_parts),
