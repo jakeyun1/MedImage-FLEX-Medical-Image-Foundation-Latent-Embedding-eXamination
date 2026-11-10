@@ -134,12 +134,11 @@ class CallableEmbeddingBackend(EmbeddingBackend):
         return self._embedding_dim
 
 class TorchvisionBackend(EmbeddingBackend):
-    def __init__(self, model_id, model, device, transform, preprocessing_spec,
-                 target_size = [224, 224]):
+    def __init__(self, model_id, model, device, transform, preprocessing_spec, target_size = [224, 224]):
         super().__init__(model_id, device, preprocessing_spec)
+        self.transform = transform
         self.target_size = tuple(target_size)
         self.model = model.to(device).eval()
-        self.transform = transform
 
     def get_transform(self):
         """
@@ -338,12 +337,11 @@ class TensorFlowBackend(EmbeddingBackend):
         Resize a PIL image and apply the preprocessing function declared by the model.
         """
         def to_tf_tensor(img):
-            img = img.resize(self.target_size, resample=self.resize_resample)
             # Use a writable array because Keras preprocessing functions may operate in place.
             img = np.array(img, dtype=np.float32, copy=True)
             if self.preprocess_function is not None:
                 img = self.preprocess_function(img)
-            img = tf.convert_to_tensor(img, dtype = tf.float32)
+            img = tf.convert_to_tensor(img, dtype=tf.float32)
 
             return img
 

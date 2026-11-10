@@ -5,9 +5,11 @@ This file contains the functions for loading the datasets.
 """
 
 import os
+import numpy as np
 import pandas as pd
 import kagglehub
 from PIL import Image
+import torch
 from torch.utils.data import Dataset, DataLoader
 
 from scripts.cbis_ddsm import prepare_cbis_ddsm_full_mammograms
@@ -92,8 +94,8 @@ def _read_metadata(csv_paths, contract):
 
 
 def _is_metadata_file(filename, expected_filenames):
-    return filename.casefold() in {
-        expected_filename.casefold()
+    return filename in {
+        expected_filename
         for expected_filename in expected_filenames
     }
 
@@ -210,10 +212,14 @@ def _apply_exclusion_policy(contract, metadata_df, image_paths):
         path for path, sample_id in zip(image_paths, image_ids)
         if sample_id not in excluded_ids
     ]
-    if len(metadata_df) - len(retained_metadata) != len(excluded_ids):
-        raise ValueError(f"{contract.name} did not exclude every declared metadata row.")
-    if len(image_paths) - len(retained_paths) != len(excluded_ids):
-        raise ValueError(f"{contract.name} did not exclude every declared image file.")
+    # Verify no excluded IDs remain in the retained metadata
+    if retained_metadata[contract.load_id_column].astype(str).isin(excluded_ids).any():
+        raise ValueError(f"{contract.name} failed to exclude all declared metadata rows.")
+        
+    # Verify no excluded IDs remain in the retained images
+    retained_image_ids = set(contract.sample_id_from_path(p) for p in retained_paths)
+    if excluded_ids & retained_image_ids:
+        raise ValueError(f"{contract.name} failed to exclude all declared image files.")
     return retained_metadata, retained_paths, policy_audit
 
 
@@ -283,15 +289,34 @@ class GeneralDataset(Dataset):
 # Custom function for batch loading
 def custom_collate_function(batch):
         """
-        Prepares a batch for embedding extraction.
-
-        Args:
-            batch : A batch of images and image paths from the DataLoader
-        
-        Returns:
-            A Python list of a tuple of images and a tuple of image paths
+        Prepares a batch for embedding extraction, interoperable across 
+        PyTorch Tensors, TensorFlow Tensors, and PIL Images.
         """
-        return list(zip(*batch))
+        images, paths = zip(*batch)
+        first_img = images[0]
+
+        # Case 1: PyTorch tensors
+        if isinstance(first_img, torch.Tensor):
+            batched_images = torch.stack(images)
+
+        # Case 2: TensorFlow tensors
+        elif hasattr(first_img, "numpy") and callable(first_img.numpy):
+            np_batch = np.stack([img.numpy() for img in images])
+            batched_images = torch.from_numpy(np_batch)
+
+        # Case 3: NumPy arrays
+        elif isinstance(first_img, np.ndarray):
+            batched_images = torch.from_numpy(np.stack(images))
+
+        # Case 4: Raw PIL Images
+        elif isinstance(first_img, Image.Image):
+            batched_images = list(images)
+
+        # Fallback for unknown object types
+        else:
+            batched_images = list(images)
+
+        return batched_images, list(paths)
 
 # Function to effectively load datasets based on their structure
 def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = False,

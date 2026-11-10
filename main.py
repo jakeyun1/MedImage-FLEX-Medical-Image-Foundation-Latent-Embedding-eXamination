@@ -237,6 +237,7 @@ def main():
         evaluation_metadata, fold_assignments, manifest_info = (
             prepare_experiment_manifest(
                 evaluation_metadata,
+                model_id=model_id,
                 dataset_name=dataloader.dataset_name,
                 id_col=id_col,
                 label_col=label_col,

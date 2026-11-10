@@ -14,8 +14,23 @@ from sklearn.model_selection import StratifiedGroupKFold
 
 from scripts.dataset_contracts import get_dataset_contract
 
-
+PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|"]
 MANIFEST_SCHEMA_VERSION = 4
+
+def _clean_filename(filename, desired_char):
+        """
+        Helper function for standardizing embedding filenames.
+
+        Args:
+            filename : Initial file basename
+            desired_char : Replacement for illegal characters
+
+        Returns:
+            filename : Cleaned, legal file basename
+        """
+        for char in PROHIBITED_CHARS:
+            filename = filename.replace(char, desired_char)
+        return filename
 
 
 def sample_ids_from_paths(dataset_name, image_paths):
@@ -86,12 +101,12 @@ def _select_complete_groups(eligible, max_samples, sample_seed, n_splits):
 
 
 def _manifest_path(
-    manifest_dir, dataset_name, group_col, max_samples, sample_seed, n_splits, fold_seed
+    manifest_dir, model_id, dataset_name, group_col, max_samples, sample_seed, n_splits, fold_seed
 ):
     cohort = "all" if max_samples is None else str(max_samples)
     group_key = group_col.lower().replace(" ", "-")
     filename = (
-        f"{dataset_name}_group-{group_key}_v{MANIFEST_SCHEMA_VERSION}_"
+        f"{_clean_filename(model_id, '-')}_{dataset_name}_group-{group_key}_v{MANIFEST_SCHEMA_VERSION}_"
         f"n{cohort}_sample{sample_seed}_"
         f"folds{n_splits}_fold{fold_seed}.csv"
     )
@@ -108,6 +123,7 @@ def _file_sha256(path):
 
 def prepare_experiment_manifest(
     metadata_df,
+    model_id,
     dataset_name,
     id_col,
     label_col,
@@ -164,7 +180,7 @@ def prepare_experiment_manifest(
         )
 
     path = _manifest_path(
-        manifest_dir, dataset_name, group_col, max_samples, sample_seed,
+        manifest_dir, model_id, dataset_name, group_col, max_samples, sample_seed,
         n_splits, fold_seed
     )
     os.makedirs(manifest_dir, exist_ok=True)

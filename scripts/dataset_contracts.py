@@ -58,12 +58,12 @@ class DatasetContract:
         if not self.image_directory_names:
             return True
         path_parts = {
-            part.casefold()
+            part
             for part in str(path).replace("\\", "/").split("/")
             if part
         }
         return any(
-            directory_name.casefold() in path_parts
+            directory_name in path_parts
             for directory_name in self.image_directory_names
         )
 
