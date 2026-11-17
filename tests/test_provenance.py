@@ -74,9 +74,16 @@ class ProvenanceTests(unittest.TestCase):
 
     @patch("scripts.provenance._git_provenance")
     @patch("scripts.provenance._distribution_version")
+    @patch("scripts.provenance.collect_hardware_metadata")
     def test_run_provenance_documents_config_code_and_runtime(
-        self, distribution_version, git_provenance
+        self, hardware_metadata, distribution_version, git_provenance
     ):
+        hardware_metadata.return_value = {
+            "schema_version": 1,
+            "cpu": {},
+            "memory": {},
+            "accelerators": {},
+        }
         distribution_version.return_value = "1.2.3"
         git_provenance.return_value = {
             "commit": "abc123",
@@ -86,9 +93,10 @@ class ProvenanceTests(unittest.TestCase):
         }
         result = build_run_provenance({"model_id": "resnet50"}, "/repo")
 
-        self.assertEqual(result["schema_version"], 1)
+        self.assertEqual(result["schema_version"], 2)
         self.assertEqual(len(result["config_canonical_sha256"]), 64)
         self.assertEqual(result["git"]["commit"], "abc123")
+        self.assertEqual(result["hardware"]["schema_version"], 1)
         self.assertIn("python_version", result["runtime"])
         self.assertEqual(
             result["runtime"]["package_versions"]["torch"], "1.2.3"

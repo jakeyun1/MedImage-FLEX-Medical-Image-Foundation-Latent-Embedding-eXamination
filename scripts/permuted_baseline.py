@@ -10,7 +10,10 @@ from time import perf_counter
 
 import numpy as np
 
-from scripts.random_baseline import aggregate_benchmark_results
+from scripts.random_baseline import (
+    _validate_clustering_protocol,
+    aggregate_benchmark_results,
+)
 from scripts.reproducibility import sample_ids_from_paths
 
 
@@ -47,6 +50,7 @@ def _validate_cached_result(result, expected, manifest_info):
             "Cached permuted baseline uses an incompatible result schema; "
             "rerun it with overwrite enabled."
         )
+    _validate_clustering_protocol(result)
     info = result.get("baseline_info", {})
     for key, value in expected.items():
         if info.get(key) != value:
@@ -70,7 +74,7 @@ def run_permuted_baseline(
     label_col,
     output_dir,
     matched_model_id,
-    repeats=20,
+    repeats=50,
     seed_start=42,
     overwrite=False,
     outer_folds=None,

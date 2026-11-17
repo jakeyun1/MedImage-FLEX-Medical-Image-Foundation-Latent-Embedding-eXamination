@@ -3,7 +3,12 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from scripts.odir import ODIR_LABELS, pool_odir_patient_embeddings, prepare_odir_eye_records
+from scripts.odir import (
+    ODIR_LABELS,
+    pool_odir_patient_embeddings,
+    prepare_odir_eye_records,
+    prepare_odir_patient_metadata,
+)
 from scripts.tests import prepare_data_multilabel
 
 
@@ -29,6 +34,8 @@ class OdirPreparationTests(unittest.TestCase):
         eyes, source_audit = prepare_odir_eye_records(source)
         self.assertEqual(len(eyes), 4)
         self.assertEqual(source_audit["multilabel_patients"], 1)
+        patients = prepare_odir_patient_metadata(eyes)
+        self.assertEqual(patients["ID"].tolist(), ["1", "2"])
 
         paths = ["/images/2_right.jpg", "/images/1_left.jpg",
                  "/images/2_left.jpg", "/images/1_right.jpg"]

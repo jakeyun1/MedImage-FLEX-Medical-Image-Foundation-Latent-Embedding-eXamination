@@ -32,6 +32,7 @@ class ExperimentManifestTests(unittest.TestCase):
     def _prepare(self, manifest_dir, max_samples=12, sample_seed=17):
         return prepare_experiment_manifest(
             self.metadata,
+            model_id="fixture/model",
             dataset_name="pad_ufes",
             id_col="sample_id",
             label_col="label",

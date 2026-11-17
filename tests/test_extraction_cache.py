@@ -110,10 +110,15 @@ class ExtractionCacheTests(unittest.TestCase):
         extract_embeddings(loader, FakeBackend([[[1.0], [2.0]]]), False, True)
 
         changed_loader = FakeDataLoader(
-            "ham10000", ["/data/a.jpg", "/data/c.jpg"], []
+            "ham10000", ["/data/a.jpg", "/data/c.jpg"],
+            [(["a", "c"], ["/data/a.jpg", "/data/c.jpg"])],
         )
-        with self.assertRaisesRegex(ValueError, "sample IDs do not match"):
-            extract_embeddings(changed_loader, FakeBackend([]), False, True)
+        changed_backend = FakeBackend([[[3.0], [4.0]]])
+        embeddings, _, source = extract_embeddings(
+            changed_loader, changed_backend, False, True
+        )
+        self.assertEqual(source, "computed")
+        np.testing.assert_array_equal(embeddings[:, 0], [3.0, 4.0])
 
     def test_cache_rejects_tampered_sample_id_hash(self):
         paths = ["/data/a.jpg", "/data/b.jpg"]
@@ -210,6 +215,24 @@ class ExtractionCacheTests(unittest.TestCase):
         )
         self.assertEqual(source, "computed")
         np.testing.assert_array_equal(embeddings, [[1.0]])
+
+    def test_runtime_separates_computation_and_cache_read(self):
+        paths = ["/data/a.jpg"]
+        loader = FakeDataLoader("ham10000", paths, [(["a"], paths)])
+        computed = extract_embeddings(
+            loader, FakeBackend([[[1.0]]]), False, True, return_runtime=True
+        )
+        self.assertEqual(computed[2], "computed")
+        self.assertGreaterEqual(computed[3]["compute_seconds"], 0)
+        self.assertEqual(computed[3]["cache_read_seconds"], 0)
+
+        cached = extract_embeddings(
+            FakeDataLoader("ham10000", paths, []), FakeBackend([]),
+            False, True, return_runtime=True
+        )
+        self.assertEqual(cached[2], "cache")
+        self.assertEqual(cached[3]["compute_seconds"], 0)
+        self.assertGreaterEqual(cached[3]["cache_read_seconds"], 0)
 
 
 if __name__ == "__main__":

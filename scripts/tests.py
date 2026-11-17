@@ -157,7 +157,7 @@ def prepare_data_multilabel(dataset_name, embeddings, metadata_df, image_paths, 
     return X, y, classes, is_multilabel
 
 def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
-                            sample_ids = None):
+                            sample_ids = None, return_sample_ids = False):
     """
     Prepares the data for adapters. Treats multilabel data as multiclass data.
     Embeddings are ordered to be "paired" up with their associated image and target.
@@ -200,6 +200,8 @@ def prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths, 
     y = le.fit_transform(df[label_col].astype(str).to_numpy())
     classes = list(le.classes_)
 
+    if return_sample_ids:
+        return X, y, classes, df[id_col].astype(str).to_numpy()
     return X, y, classes
 
 
@@ -1446,11 +1448,13 @@ def retrieval_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, l
 
 def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
                     k_range = range(2, 15), random_state = 42,
-                    compute_silhouette = True, sample_ids = None):
+                    compute_silhouette = True, sample_ids = None,
+                    n_init = 20, seed_repeats = 10, max_iter = 500,
+                    return_artifact = False):
     """
     Run KMeans for multiple numbers of clusters (k_range) and compute ARI/NMI (and silhouette if requested).
 
-    For Multilabel data, Ground Truth (GT) is defined as the unique 
+    For Multilabel data, Ground Truth (GT) is defined as the unique
     vector combination (stringified) for ARI/NMI calculation.
 
     Args:
@@ -1466,19 +1470,49 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
     Returns:
         results_dict : JSON-compatible summary of the clustering test
     """
-    X, y, classes = prepare_data_multiclass(dataset_name, embeddings, metadata_df, image_paths,
-            id_col, label_col, sample_ids = sample_ids)
+    if not isinstance(n_init, int) or isinstance(n_init, bool) or n_init < 1:
+        raise ValueError("n_init must be a positive integer.")
+    if not isinstance(seed_repeats, int) or isinstance(seed_repeats, bool) or seed_repeats < 2:
+        raise ValueError("seed_repeats must be an integer of at least 2.")
+    if not isinstance(max_iter, int) or isinstance(max_iter, bool) or max_iter < 1:
+        raise ValueError("max_iter must be a positive integer.")
+    if not isinstance(random_state, int) or isinstance(random_state, bool):
+        raise ValueError("random_state must be an integer.")
+
+    prepared = prepare_data_multiclass(
+        dataset_name, embeddings, metadata_df, image_paths, id_col, label_col,
+        sample_ids=sample_ids, return_sample_ids=return_artifact
+    )
+    if return_artifact:
+        X, y, classes, aligned_sample_ids = prepared
+    else:
+        X, y, classes = prepared
 
     class_count_k = len(classes)
     eval_k_values = sorted(set(k_range) | {class_count_k})
 
     print(f"--- Clustering evaluation with k_min={min(eval_k_values)} through k_max={max(eval_k_values)} ---")
 
-    # Run KMeans for each k
+    if not eval_k_values or min(eval_k_values) < 2 or max(eval_k_values) >= len(X):
+        raise ValueError("Every clustering k must be between 2 and n_samples - 1.")
+
+    def fit_kmeans(k, seed):
+        estimator = KMeans(
+            n_clusters = k,
+            n_init = n_init,
+            max_iter = max_iter,
+            random_state = seed,
+        )
+        labels = estimator.fit_predict(X)
+        return estimator, labels
+
+    # Run a robust KMeans fit for each k using the primary seed.
     results = []
+    class_count_labels = None
     for k in eval_k_values:
-        kmeans = KMeans(n_clusters = k, n_init = "auto", random_state = random_state)
-        cluster_labels = kmeans.fit_predict(X)
+        kmeans, cluster_labels = fit_kmeans(k, random_state)
+        if k == class_count_k:
+            class_count_labels = cluster_labels.copy()
 
         ari = adjusted_rand_score(y, cluster_labels)
         nmi = normalized_mutual_info_score(y, cluster_labels)
@@ -1488,7 +1522,14 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         else:
             sil = np.nan
 
-        results.append({"k": k, "ARI": ari, "NMI": nmi, "Silhouette": sil})
+        results.append({
+            "k": k,
+            "ARI": ari,
+            "NMI": nmi,
+            "Silhouette": sil,
+            "inertia": float(kmeans.inertia_),
+            "n_iter": int(kmeans.n_iter_),
+        })
 
     results_df = pd.DataFrame(results)
 
@@ -1497,14 +1538,53 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
             "k": int(row["k"]),
             "ARI": float(row["ARI"]),
             "NMI": float(row["NMI"]),
-            "Silhouette": float(row["Silhouette"])
+            "Silhouette": float(row["Silhouette"]),
+            "inertia": float(row["inertia"]),
+            "n_iter": int(row["n_iter"]),
+        }
+
+    class_count_row = results_df.loc[results_df["k"] == class_count_k].iloc[0]
+    seeds = [int(random_state + offset) for offset in range(seed_repeats)]
+    stability_rows = [{
+        "seed": seeds[0],
+        "ARI": float(class_count_row["ARI"]),
+        "NMI": float(class_count_row["NMI"]),
+        "inertia": float(class_count_row["inertia"]),
+        "n_iter": int(class_count_row["n_iter"]),
+    }]
+    assignments = [class_count_labels]
+    for seed in seeds[1:]:
+        estimator, labels = fit_kmeans(class_count_k, seed)
+        stability_rows.append({
+            "seed": seed,
+            "ARI": float(adjusted_rand_score(y, labels)),
+            "NMI": float(normalized_mutual_info_score(y, labels)),
+            "inertia": float(estimator.inertia_),
+            "n_iter": int(estimator.n_iter_),
+        })
+        assignments.append(labels)
+
+    assignment_ari = [
+        float(adjusted_rand_score(assignments[left], assignments[right]))
+        for left in range(len(assignments))
+        for right in range(left + 1, len(assignments))
+    ]
+
+    def summarize_stability(values, expected_count):
+        array = np.asarray(values, dtype=float)
+        if len(array) != expected_count or not np.all(np.isfinite(array)):
+            raise ValueError("KMeans stability metrics must be finite for every seed.")
+        return {
+            "mean": float(np.mean(array)),
+            "std": float(np.std(array, ddof=1)),
+            "min": float(np.min(array)),
+            "max": float(np.max(array)),
         }
 
     # Display summary
     best_k_ari = results_df.loc[results_df["ARI"].idxmax()]
     best_k_nmi = results_df.loc[results_df["NMI"].idxmax()]
     best_k_sil = results_df.loc[results_df["Silhouette"].idxmax()] if compute_silhouette else None
-    class_count_row = results_df.loc[results_df["k"] == class_count_k].iloc[0]
 
     print("KMeans Clustering Evaluation (variable k):")
     print(results_df.round(4))
@@ -1523,11 +1603,34 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
         "oracle_best_nmi": row_summary(best_k_nmi),
         "class_count_k": row_summary(class_count_row),
         "k_sweep": [row_summary(row) for _, row in results_df.iterrows()],
+        "seed_stability": {
+            "k": int(class_count_k),
+            "seeds": seeds,
+            "per_seed": stability_rows,
+            "ARI": summarize_stability(
+                [row["ARI"] for row in stability_rows], seed_repeats
+            ),
+            "NMI": summarize_stability(
+                [row["NMI"] for row in stability_rows], seed_repeats
+            ),
+            "inertia": summarize_stability([
+                row["inertia"] for row in stability_rows
+            ], seed_repeats),
+            "assignment_ARI_between_seeds": summarize_stability(
+                assignment_ari, seed_repeats * (seed_repeats - 1) // 2
+            ),
+            "pairwise_assignment_comparisons": int(len(assignment_ari)),
+        },
         "evaluation_protocol": {
             "algorithm": "kmeans",
             "k_range": [int(k) for k in eval_k_values],
             "primary_k_rule": "number_of_classes",
             "random_state": int(random_state),
+            "n_init": int(n_init),
+            "max_iter": int(max_iter),
+            "seed_repeats": int(seed_repeats),
+            "stability_seeds": seeds,
+            "stability_k": int(class_count_k),
             "compute_silhouette": compute_silhouette,
             "label_tuned_primary": False
         }
@@ -1543,4 +1646,24 @@ def clustering_eval(dataset_name, embeddings, metadata_df, image_paths, id_col, 
             "be interpreted as exploratory."
         )
 
-    return results_dict
+    if not return_artifact:
+        return results_dict
+
+    from scripts.clustering_artifacts import CLUSTERING_ARTIFACT_SCHEMA_VERSION
+    from scripts.data_audit import ordered_ids_sha256
+    artifact = {
+        "schema_version": np.asarray(
+            CLUSTERING_ARTIFACT_SCHEMA_VERSION, dtype=np.int64
+        ),
+        "dataset_name": np.asarray(str(dataset_name)),
+        "k": np.asarray(class_count_k, dtype=np.int64),
+        "classes": np.asarray([str(value) for value in classes], dtype=str),
+        "sample_ids": np.asarray(aligned_sample_ids, dtype=str),
+        "y_true": np.asarray(y, dtype=np.int64),
+        "seeds": np.asarray(seeds, dtype=np.int64),
+        "assignments": np.asarray(assignments, dtype=np.int64),
+        "ordered_sample_ids_sha256": np.asarray(
+            ordered_ids_sha256(list(aligned_sample_ids))
+        ),
+    }
+    return results_dict, artifact

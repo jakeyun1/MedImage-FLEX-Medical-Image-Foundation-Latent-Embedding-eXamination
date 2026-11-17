@@ -5,6 +5,7 @@ This file contains the logic for extracting embeddings from a dataset.
 """
 
 import os
+from time import perf_counter
 
 import numpy as np
 from tqdm import tqdm
@@ -46,9 +47,14 @@ def preprocessing_fingerprint(backend):
 
 def _cache_paths(dataloader, backend, normalize):
     preprocessing_sha256 = preprocessing_fingerprint(backend)
+    cohort_ids = _sample_ids(
+        dataloader.dataset_name, list(dataloader.dataset.image_paths)
+    )
+    _require_unique_sample_ids(cohort_ids, "Cache cohort")
+    cohort_sha256 = ordered_ids_sha256(cohort_ids)
     filename = (
         f"{backend.model_id}+{dataloader.dataset_name}+"
-        f"pre-{preprocessing_sha256[:12]}"
+        f"pre-{preprocessing_sha256[:12]}+cohort-{cohort_sha256[:12]}"
     )
     filename = _clean_filename(filename, "-").replace(".", "")
     normalization = "normalized" if normalize else "unnormalized"
@@ -188,17 +194,31 @@ def _load_embedding_cache(filepath, dataloader, backend, normalize):
     return embeddings, aligned_paths
 
 
-def extract_embeddings(dataloader, backend, normalize=True, cache=False):
+def extract_embeddings(dataloader, backend, normalize=True, cache=False,
+                       return_runtime=False):
     """Extract embeddings while preserving their exact image-row correspondence."""
+    total_start = perf_counter()
+    cache_read_seconds = 0.0
+    compute_seconds = 0.0
+    cache_write_seconds = 0.0
     filepath, legacy_filepath = _cache_paths(dataloader, backend, normalize)
     preprocessing_sha256 = preprocessing_fingerprint(backend)
 
     if cache and os.path.exists(filepath):
         print(f"Embeddings cache detected! Loading '{os.path.abspath(filepath)}'")
+        cache_read_start = perf_counter()
         embeddings, image_paths = _load_embedding_cache(
             filepath, dataloader, backend, normalize
         )
-        return embeddings, image_paths, "cache"
+        cache_read_seconds = perf_counter() - cache_read_start
+        runtime = {
+            "total_seconds": float(perf_counter() - total_start),
+            "compute_seconds": 0.0,
+            "cache_read_seconds": float(cache_read_seconds),
+            "cache_write_seconds": 0.0,
+        }
+        result = (embeddings, image_paths, "cache")
+        return (*result, runtime) if return_runtime else result
 
     if cache and os.path.exists(legacy_filepath):
         print(
@@ -206,11 +226,21 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False):
             "it cannot prove image-row alignment."
         )
 
+    from scripts.runtime_metadata import synchronize_backend
+
+    synchronize_backend(backend)
+    compute_start = perf_counter()
     embedding_batches = []
     image_paths = []
     for batch in tqdm(dataloader, desc="Extracting embeddings"):
         images, paths = batch
         embeddings = backend.encode_batch(images)
+
+        if not hasattr(backend, "observed_output_device"):
+            output_device = getattr(embeddings, "device", None)
+            backend.observed_output_device = (
+                str(output_device) if output_device is not None else "unknown"
+            )
 
         if normalize:
             embeddings = embeddings / embeddings.norm(p=2, dim=-1, keepdim=True)
@@ -237,8 +267,11 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False):
         raise ValueError(
             "Extracted sample IDs do not match the dataset sample IDs."
         )
+    synchronize_backend(backend)
+    compute_seconds = perf_counter() - compute_start
 
     if cache:
+        cache_write_start = perf_counter()
         _write_embedding_cache(
             filepath,
             embeddings,
@@ -248,6 +281,14 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False):
             preprocessing_sha256,
             normalize,
         )
+        cache_write_seconds = perf_counter() - cache_write_start
         print(f"Embeddings cached to: {os.path.abspath(filepath)}\n")
 
-    return embeddings, image_paths, "computed"
+    runtime = {
+        "total_seconds": float(perf_counter() - total_start),
+        "compute_seconds": float(compute_seconds),
+        "cache_read_seconds": 0.0,
+        "cache_write_seconds": float(cache_write_seconds),
+    }
+    result = (embeddings, image_paths, "computed")
+    return (*result, runtime) if return_runtime else result

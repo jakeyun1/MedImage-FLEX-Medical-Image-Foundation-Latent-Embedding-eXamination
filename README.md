@@ -76,3 +76,31 @@ ordered sample-ID hashes remain separate because they document embedding row ord
 Results also record a canonical configuration SHA-256, Git commit and separate
 tracked/untracked-worktree state, Python runtime, platform, and relevant package
 versions.
+
+Runs also capture rootless hardware and execution metadata for defensible runtime
+reporting: process-visible CPU and memory resources, optional GPU inventory,
+framework-observed device evidence, cache status, embedding throughput, and peak
+memory when supported. Missing HPC/container interfaces are recorded as unavailable
+rather than treated as evidence of CPU or GPU execution.
+The frozen manifest cohort is applied before image decoding and inference; embedding
+timing separately records computation, cache reads, cache writes, and overhead.
+Repeated K-means sample assignments are saved as validated compressed artifacts.
+
+## Statistical input validation
+
+The read-only statistical input layer discovers completed model runs, verifies
+artifact hashes and schemas, reconstructs pooled OOF macro-F1 and label-macro mAP,
+requires exact paired-unit alignment across models, and then runs group-paired
+bootstrap and permutation inference with Holm-adjusted pairwise tests. Start from
+[`analysis_config.example.json`](analysis_config.example.json); the full design and
+failure policy are in
+[`STATISTICAL_INPUT_LAYER_PLAN.md`](STATISTICAL_INPUT_LAYER_PLAN.md) and
+[`STATISTICAL_INFERENCE_PLAN.md`](STATISTICAL_INFERENCE_PLAN.md).
+Matched CheXpert uncertainty sensitivities are auto-discovered and summarized when
+present; partial policy/model coverage is rejected.
+
+```bash
+python3 scripts/validate_statistical_inputs.py \
+  --config analysis_config.example.json \
+  --output output/statistical_inputs.json
+```

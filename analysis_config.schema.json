@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://medrank.local/schemas/statistical-analysis-config-v1.json",
+  "title": "MedRank statistical input configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "results_dir",
+    "models",
+    "datasets",
+    "reference_model_id",
+    "classification",
+    "retrieval",
+    "inference",
+    "compatibility",
+    "completeness",
+    "integrity"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "results_dir": {"type": "string", "minLength": 1},
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model_id", "display_name"],
+        "properties": {
+          "model_id": {"type": "string", "minLength": 1},
+          "display_name": {"type": "string", "minLength": 1},
+          "run_dir": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "reference_model_id": {"type": "string", "minLength": 1},
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adapter", "endpoint"],
+      "properties": {
+        "adapter": {"type": "string", "minLength": 1},
+        "endpoint": {"const": "pooled_oof_macro_f1"}
+      }
+    },
+    "retrieval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["endpoint", "require_all_labels_eligible"],
+      "properties": {
+        "endpoint": {"const": "label_macro_map"},
+        "require_all_labels_eligible": {"type": "boolean"}
+      }
+    },
+    "inference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bootstrap_repetitions",
+        "permutation_repetitions",
+        "confidence_level",
+        "seed",
+        "pairwise_alternative",
+        "holm_family"
+      ],
+      "properties": {
+        "bootstrap_repetitions": {"type": "integer", "minimum": 1},
+        "permutation_repetitions": {"type": "integer", "minimum": 1},
+        "confidence_level": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "seed": {"type": "integer", "minimum": 0},
+        "pairwise_alternative": {"const": "two_sided"},
+        "holm_family": {"const": "within_dataset_endpoint"}
+      }
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_schema_versions",
+        "oof_artifact_schema_versions",
+        "retrieval_artifact_schema_versions"
+      ],
+      "properties": {
+        "result_schema_versions": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "oof_artifact_schema_versions": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "retrieval_artifact_schema_versions": {
+          "type": "array", "minItems": 1,
+          "items": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allow_missing_models", "allow_unexpected_models"],
+      "properties": {
+        "allow_missing_models": {"type": "boolean"},
+        "allow_unexpected_models": {"type": "boolean"}
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verify_artifact_sha256"],
+      "properties": {
+        "verify_artifact_sha256": {"type": "boolean"}
+      }
+    }
+  }
+}

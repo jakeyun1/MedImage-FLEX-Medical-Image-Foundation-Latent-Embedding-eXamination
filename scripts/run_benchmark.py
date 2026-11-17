@@ -7,6 +7,10 @@ This file executes the testbench.
 import os
 from time import perf_counter
 
+from scripts.clustering_artifacts import (
+    CLUSTERING_ARTIFACT_SCHEMA_VERSION,
+    write_clustering_artifact,
+)
 from scripts.oof import OOF_SCHEMA_VERSION, write_oof_artifact
 from scripts.retrieval_artifacts import (
     RETRIEVAL_ARTIFACT_SCHEMA_VERSION,
@@ -23,7 +27,8 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
                   outer_folds = None, n_splits = 5, random_state = 42,
                   group_col = None, sample_ids = None, oof_output_dir = None,
                   oof_path_prefix = None, retrieval_output_dir = None,
-                  retrieval_path_prefix = None):
+                  retrieval_path_prefix = None, clustering_output_dir = None,
+                  clustering_path_prefix = None):
     """
     Runs the testbench and returns the results for all adapters (for a given model on a given dataset).
 
@@ -126,13 +131,33 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
     print(f"Completed retrieval evaluation on {dataset_name}.\n")
 
     # Clustering
-    clustering_results, clustering_seconds = timed_call(
+    clustering_tuple, clustering_seconds = timed_call(
         clustering_eval,
         dataset_name, embeddings, metadata_df, image_paths,
         id_col = id_col, label_col = label_col,
         k_range = range(2, 12), random_state = random_state,
-        sample_ids = sample_ids
+        sample_ids = sample_ids, return_artifact = True
     )
+    clustering_results, clustering_artifact = clustering_tuple
+    clustering_artifact_started = perf_counter()
+    clustering_artifact_metadata = {
+        "schema_version": CLUSTERING_ARTIFACT_SCHEMA_VERSION,
+        "enabled": clustering_output_dir is not None,
+        "artifact": None,
+    }
+    if clustering_output_dir is not None:
+        filename = "assignments.npz"
+        relative_path = (
+            os.path.join(clustering_path_prefix, filename)
+            if clustering_path_prefix is not None else None
+        )
+        clustering_artifact_metadata["artifact"] = write_clustering_artifact(
+            clustering_artifact,
+            clustering_output_dir,
+            filename=filename,
+            relative_path=relative_path,
+        )
+    clustering_artifact_seconds = perf_counter() - clustering_artifact_started
     print(f"Completed clustering evaluation on {dataset_name}.\n\n")
 
     # Compile the results
@@ -146,6 +171,7 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
         "retrieval": ret_results,
         "retrieval_queries": retrieval_artifact_metadata,
         "clustering": clustering_results,
+        "clustering_assignments": clustering_artifact_metadata,
         "runtime": {
             "unit": "seconds",
             "timer": "time.perf_counter",
@@ -157,7 +183,8 @@ def run_benchmark(dataset_name, embeddings, metadata_df, image_paths, id_col, la
                 "oof_serialization": float(oof_seconds),
                 "retrieval": float(retrieval_seconds),
                 "retrieval_serialization": float(retrieval_artifact_seconds),
-                "clustering": float(clustering_seconds)
+                "clustering": float(clustering_seconds),
+                "clustering_serialization": float(clustering_artifact_seconds)
             }
         }
     }

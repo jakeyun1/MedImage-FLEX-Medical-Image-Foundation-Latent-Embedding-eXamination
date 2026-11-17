@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "results_dir": "results",
+  "models": [
+    {"model_id": "resnet50", "display_name": "ResNet-50"},
+    {"model_id": "densenet121", "display_name": "DenseNet-121"},
+    {"model_id": "google/vit-base-patch16-224-in21k", "display_name": "ViT-B/16"},
+    {"model_id": "biomedclip", "display_name": "BiomedCLIP"},
+    {"model_id": "med-flamingo/med-flamingo", "display_name": "Med-Flamingo"},
+    {"model_id": "google/medsiglip-448", "display_name": "MedSigLIP"},
+    {"model_id": "microsoft/rad-dino", "display_name": "RAD-DINO"},
+    {"model_id": "google/cxr-foundation", "display_name": "CXR Foundation"}
+  ],
+  "datasets": ["pad_ufes", "cbis_ddsm", "ham10000", "odir", "chexpert"],
+  "reference_model_id": "resnet50",
+  "classification": {
+    "adapter": "logistic_regression",
+    "endpoint": "pooled_oof_macro_f1"
+  },
+  "retrieval": {
+    "endpoint": "label_macro_map",
+    "require_all_labels_eligible": true
+  },
+  "inference": {
+    "bootstrap_repetitions": 2000,
+    "permutation_repetitions": 10000,
+    "confidence_level": 0.95,
+    "seed": 42,
+    "pairwise_alternative": "two_sided",
+    "holm_family": "within_dataset_endpoint"
+  },
+  "compatibility": {
+    "result_schema_versions": [5, 6],
+    "oof_artifact_schema_versions": [1],
+    "retrieval_artifact_schema_versions": [2]
+  },
+  "completeness": {
+    "allow_missing_models": true,
+    "allow_unexpected_models": false
+  },
+  "integrity": {
+    "verify_artifact_sha256": true
+  }
+}

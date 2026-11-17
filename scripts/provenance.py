@@ -9,6 +9,8 @@ import platform
 import subprocess
 import sys
 
+from scripts.runtime_metadata import collect_hardware_metadata
+
 
 PACKAGE_DISTRIBUTIONS = {
     "cxr_foundation": ("cxr-foundation",),
@@ -138,10 +140,11 @@ def _git_provenance(repository_path):
 def build_run_provenance(config, repository_path):
     """Return compact code, configuration, and runtime metadata for one run."""
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "config_canonical_sha256": canonical_json_sha256(config),
         "git": _git_provenance(repository_path),
+        "hardware": collect_hardware_metadata(),
         "runtime": {
             "python_version": platform.python_version(),
             "python_implementation": platform.python_implementation(),

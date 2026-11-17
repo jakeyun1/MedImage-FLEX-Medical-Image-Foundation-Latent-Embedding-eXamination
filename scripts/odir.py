@@ -98,6 +98,30 @@ def prepare_odir_eye_records(source_df):
     return eye_records, audit
 
 
+def prepare_odir_patient_metadata(eye_metadata):
+    """Construct one strictly validated manifest row per ODIR patient."""
+    required = {"ID", "filename", "eye", "Diagnosis"}
+    missing = sorted(required - set(eye_metadata.columns))
+    if missing:
+        raise ValueError(f"ODIR eye metadata is missing columns: {missing}")
+
+    records = []
+    for patient_id, rows in eye_metadata.groupby("ID", sort=False):
+        if len(rows) != 2 or set(rows["eye"]) != {"left", "right"}:
+            raise ValueError(
+                f"ODIR patient {patient_id} does not have exactly one left and right eye."
+            )
+        labels = rows["Diagnosis"].map(tuple)
+        if labels.nunique() != 1:
+            raise ValueError(f"ODIR patient {patient_id} has inconsistent eye labels.")
+        records.append({"ID": str(patient_id), "Diagnosis": list(labels.iloc[0])})
+
+    result = pd.DataFrame.from_records(records)
+    if result.empty or result["ID"].duplicated().any():
+        raise ValueError("ODIR patient metadata must be nonempty with unique IDs.")
+    return result
+
+
 def pool_odir_patient_embeddings(embeddings, eye_metadata, image_paths, normalize=True):
     """Mean-pool the two correctly matched eye embeddings for each patient."""
     contract = get_dataset_contract("odir")
@@ -120,18 +144,11 @@ def pool_odir_patient_embeddings(embeddings, eye_metadata, image_paths, normaliz
         )
 
     index_by_image_id = {sample_id: index for index, sample_id in enumerate(image_ids)}
+    patient_metadata = prepare_odir_patient_metadata(eye_metadata)
     pooled_embeddings = []
-    patient_records = []
     patient_ids = []
-    for patient_id, rows in eye_metadata.groupby("ID", sort=False):
-        if len(rows) != 2 or set(rows["eye"]) != {"left", "right"}:
-            raise ValueError(
-                f"ODIR patient {patient_id} does not have exactly one left and right eye."
-            )
-        labels = rows["Diagnosis"].map(tuple)
-        if labels.nunique() != 1:
-            raise ValueError(f"ODIR patient {patient_id} has inconsistent eye labels.")
-
+    for patient_id in patient_metadata["ID"]:
+        rows = eye_metadata[eye_metadata["ID"].astype(str) == str(patient_id)]
         ordered = rows.set_index("eye").loc[["left", "right"]]
         indices = [index_by_image_id[filename] for filename in ordered["filename"]]
         pooled = array[indices].mean(axis=0)
@@ -146,13 +163,8 @@ def pool_odir_patient_embeddings(embeddings, eye_metadata, image_paths, normaliz
         patient_id = str(patient_id)
         pooled_embeddings.append(pooled)
         patient_ids.append(patient_id)
-        patient_records.append({
-            "ID": patient_id,
-            "Diagnosis": list(labels.iloc[0]),
-        })
 
     patient_embeddings = np.asarray(pooled_embeddings, dtype=np.float32)
-    patient_metadata = pd.DataFrame.from_records(patient_records)
     if len(set(patient_ids)) != len(patient_ids):
         raise ValueError("ODIR pooled patient IDs are not unique.")
     if len(patient_embeddings) != len(patient_metadata):

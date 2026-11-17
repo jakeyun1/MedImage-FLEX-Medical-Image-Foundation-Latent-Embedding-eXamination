@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import inspect
 from types import SimpleNamespace
 
 import numpy as np
@@ -11,10 +12,11 @@ if "optuna" not in sys.modules:
     optuna.logging = SimpleNamespace(WARNING=30, set_verbosity=lambda level: None)
     sys.modules["optuna"] = optuna
 
-from scripts.random_baseline import aggregate_benchmark_results
+from scripts.random_baseline import aggregate_benchmark_results, run_random_baseline
 from scripts.random_baseline import _validate_cached_result as validate_random_cache
 from scripts.permuted_baseline import (
     _validate_cached_result as validate_permuted_cache,
+    run_permuted_baseline,
 )
 from scripts.tests import (
     CLASSIFICATION_TUNING_METRIC,
@@ -132,6 +134,42 @@ class ClassificationMetricTests(unittest.TestCase):
             with self.subTest(validator=validator.__module__):
                 with self.assertRaisesRegex(ValueError, "result schema"):
                     validator({}, {}, None)
+
+    def test_baseline_defaults_use_fifty_repetitions(self):
+        self.assertEqual(
+            inspect.signature(run_random_baseline).parameters["repeats"].default,
+            50,
+        )
+        self.assertEqual(
+            inspect.signature(run_permuted_baseline).parameters["repeats"].default,
+            50,
+        )
+
+    def test_cached_baselines_require_current_clustering_protocol(self):
+        result = {
+            "result_schema_version": 6,
+            "baseline_info": {},
+            "clustering": {
+                "evaluation_protocol": {
+                    "n_init": 20,
+                    "max_iter": 500,
+                    "seed_repeats": 10,
+                }
+            },
+        }
+        for validator in (validate_random_cache, validate_permuted_cache):
+            validator(result, {}, None)
+            incompatible = {
+                **result,
+                "clustering": {
+                    "evaluation_protocol": {
+                        **result["clustering"]["evaluation_protocol"],
+                        "n_init": "auto",
+                    }
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "clustering protocol"):
+                validator(incompatible, {}, None)
 
 
 if __name__ == "__main__":

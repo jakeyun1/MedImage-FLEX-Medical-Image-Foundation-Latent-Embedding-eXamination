@@ -47,7 +47,7 @@
     "random_baseline": {
         "enabled": Run the complete benchmark on dimension-matched random Gaussian
                    embeddings (optional, default is false),
-        "repeats": Number of random embedding seeds (optional, default is 20),
+        "repeats": Number of random embedding seeds (optional, default is 50),
         "seed": First random embedding seed; subsequent runs increment it by one
                 (optional, default is 42),
         "overwrite": Recompute existing per-seed results instead of resuming
@@ -62,7 +62,7 @@
     "permuted_baseline": {
         "enabled": Run the complete benchmark after permuting genuine embeddings
                    among the selected samples (optional, default is false),
-        "repeats": Number of permutation seeds (optional, default is 20),
+        "repeats": Number of permutation seeds (optional, default is 50),
         "seed": First permutation seed; subsequent runs increment it by one
                 (optional, default is 42),
         "overwrite": Recompute existing per-seed results instead of resuming
@@ -106,7 +106,7 @@
 
     "random_baseline": {
         "enabled": true,
-        "repeats": 20,
+        "repeats": 50,
         "seed": 42,
         "overwrite": false
     },
@@ -117,7 +117,7 @@
 
     "permuted_baseline": {
         "enabled": true,
-        "repeats": 20,
+        "repeats": 50,
         "seed": 42,
         "overwrite": false
     },
@@ -136,6 +136,12 @@ CheXpert sensitivity results are saved as
 `<run_folder>/chexpert_sensitivity/<policy>.json`, with matched OOF and retrieval
 artifacts under their corresponding `chexpert_sensitivity/<policy>/` directories.
 They reuse the primary cohort manifest, outer folds, and extracted embeddings.
+
+Clustering is part of every benchmark run. K-means uses 20 initializations and
+up to 500 iterations for each reported k. The class-count k is additionally fit
+with 10 deterministic seeds to report label-score and assignment stability. The
+aligned assignments are saved under `<run_folder>/clustering/<dataset>/assignments.npz`
+(and the corresponding CheXpert sensitivity directory).
 
 When enabled, baseline results are saved beneath
 `<run_folder>/random_baseline/<dataset>/`. Each seed has a full benchmark JSON,
@@ -193,6 +199,17 @@ probabilities for one adapter. Artifacts are validated for complete one-time sam
 coverage, group isolation, finite probability shapes, and exact reproduction of the
 stored fold metrics. Their SHA-256 hashes and relative paths are recorded in the
 dataset result JSON. Random and permuted baseline repetitions do not emit OOF files.
+
+Hardware and execution metadata are collected automatically without configuration
+or privileged system commands. Run provenance records the CPU, process-visible core
+count and memory, and any GPU inventory available through `nvidia-smi`. Each dataset
+result also records the framework-visible backend device, fresh-versus-cached
+embedding status, image throughput, model-loading time, and available peak RAM/VRAM
+measurements. Unavailable probes are reported as null or with an explicit reason;
+the benchmark does not infer a device from runtime alone.
+The manifest-selected cohort is applied before image decoding and inference. Runtime
+metadata separates fresh computation from cache read/write time and reports compute
+throughput only from the computation interval.
 
 Retrieval reports Hit@K and Recall@K as distinct metrics. Hit@K is the fraction of
 eligible query-label units with at least one relevant candidate in the first K

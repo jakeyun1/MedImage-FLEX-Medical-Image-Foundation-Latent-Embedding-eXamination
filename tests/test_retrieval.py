@@ -349,7 +349,7 @@ class RetrievalWiringTests(unittest.TestCase):
                 return_value=({}, None),
             ),
             patch.object(benchmark_module, "retrieval_eval", side_effect=fake_retrieval),
-            patch.object(benchmark_module, "clustering_eval", return_value={}),
+            patch.object(benchmark_module, "clustering_eval", return_value=({}, None)),
         ):
             benchmark_module.run_benchmark(
                 "ham10000", np.eye(2), pd.DataFrame(), [],
@@ -384,7 +384,7 @@ class RetrievalWiringTests(unittest.TestCase):
                 "retrieval_eval",
                 return_value=(summary, artifact),
             ),
-            patch.object(benchmark_module, "clustering_eval", return_value={}),
+            patch.object(benchmark_module, "clustering_eval", return_value=({}, None)),
             patch.object(
                 benchmark_module,
                 "write_retrieval_artifact",

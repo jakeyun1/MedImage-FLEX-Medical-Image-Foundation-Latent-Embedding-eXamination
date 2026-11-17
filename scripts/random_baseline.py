@@ -46,6 +46,11 @@ HEADLINE_METRICS = (
     ("clustering", "class_count_k", "NMI"),
     ("clustering", "class_count_k", "Silhouette"),
 )
+EXPECTED_CLUSTERING_PROTOCOL = {
+    "n_init": 20,
+    "max_iter": 500,
+    "seed_repeats": 10,
+}
 
 
 def generate_random_embeddings(shape, seed, normalize=True):
@@ -125,12 +130,27 @@ def aggregate_benchmark_results(results, seeds):
     }
 
 
+def _validate_clustering_protocol(result):
+    protocol = result.get("clustering", {}).get("evaluation_protocol", {})
+    mismatches = {
+        key: {"expected": expected, "found": protocol.get(key)}
+        for key, expected in EXPECTED_CLUSTERING_PROTOCOL.items()
+        if protocol.get(key) != expected
+    }
+    if mismatches:
+        raise ValueError(
+            "Cached baseline uses an incompatible clustering protocol; "
+            f"rerun it with overwrite enabled. Mismatches: {mismatches}"
+        )
+
+
 def _validate_cached_result(result, expected, manifest_info):
     if result.get("result_schema_version") != 6:
         raise ValueError(
             "Cached random baseline uses an incompatible result schema; "
             "rerun it with overwrite enabled."
         )
+    _validate_clustering_protocol(result)
     info = result.get("baseline_info", {})
     for key, value in expected.items():
         if info.get(key) != value:
@@ -155,7 +175,7 @@ def run_random_baseline(
     output_dir,
     matched_model_id,
     normalize=True,
-    repeats=20,
+    repeats=50,
     seed_start=42,
     overwrite=False,
     outer_folds=None,

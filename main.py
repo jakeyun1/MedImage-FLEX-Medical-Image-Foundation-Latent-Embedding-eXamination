@@ -83,7 +83,9 @@ def main():
     output_dir = cfg.get("output_dir", f".{os.sep}results")
 
     datasets = cfg["dataset"]["datasets"]
-    batch_size = cfg["dataset"].get("batch_size", 32)
+    batch_size = int(cfg["dataset"].get("batch_size", 32))
+    if batch_size <= 0:
+        raise ValueError("dataset.batch_size must be a positive integer.")
     shuffle = cfg["dataset"].get("shuffle", False)
     chexpert_uncertainty_policy = cfg["dataset"].get(
         "chexpert_uncertainty_policy", "finding_specific"
@@ -101,7 +103,7 @@ def main():
 
     random_baseline_cfg = cfg.get("random_baseline", {})
     run_random_embeddings = random_baseline_cfg.get("enabled", False)
-    random_baseline_repeats = int(random_baseline_cfg.get("repeats", 20))
+    random_baseline_repeats = int(random_baseline_cfg.get("repeats", 50))
     random_baseline_seed = int(random_baseline_cfg.get("seed", 42))
     overwrite_random_baseline = random_baseline_cfg.get("overwrite", False)
 
@@ -110,7 +112,7 @@ def main():
 
     permuted_baseline_cfg = cfg.get("permuted_baseline", {})
     run_permuted_embeddings = permuted_baseline_cfg.get("enabled", False)
-    permuted_baseline_repeats = int(permuted_baseline_cfg.get("repeats", 20))
+    permuted_baseline_repeats = int(permuted_baseline_cfg.get("repeats", 50))
     permuted_baseline_seed = int(permuted_baseline_cfg.get("seed", 42))
     overwrite_permuted_baseline = permuted_baseline_cfg.get("overwrite", False)
 
@@ -146,17 +148,28 @@ def main():
     from scripts.dataloading import (
         _apply_chexpert_uncertainty_policy,
         load_dataset,
+        subset_dataloader,
         validate_chexpert_uncertainty_policies,
     )
     from scripts.data_audit import ordered_ids_sha256
     from scripts.models import build_backend
     from scripts.extraction import extract_embeddings, preprocessing_fingerprint
     from scripts.label_prior_baseline import run_label_prior_baselines
-    from scripts.odir import pool_odir_patient_embeddings
+    from scripts.odir import (
+        pool_odir_patient_embeddings,
+        prepare_odir_patient_metadata,
+    )
     from scripts.permuted_baseline import run_permuted_baseline
     from scripts.random_baseline import run_random_baseline
     from scripts.reproducibility import prepare_experiment_manifest, sample_ids_from_paths
     from scripts.run_benchmark import run_benchmark
+    from scripts.runtime_metadata import (
+        build_embedding_runtime,
+        collect_backend_execution_metadata,
+        collect_peak_memory,
+        reset_peak_memory,
+        synchronize_backend,
+    )
 
     chexpert_uncertainty_policy, chexpert_sensitivity_policies = (
         validate_chexpert_uncertainty_policies(
@@ -168,6 +181,11 @@ def main():
     print(f"Model: {model_id}")
     print(f"Output folder: {os.path.abspath(run_folder)}\n")
 
+    backend_loading_start = perf_counter()
+    backend = build_backend(model_id)
+    synchronize_backend(backend)
+    backend_loading_seconds = perf_counter() - backend_loading_start
+
     for dataset_name in datasets:
         dataset_start = perf_counter()
         print(f"Dataset: {dataset_name}")
@@ -176,9 +194,6 @@ def main():
         id_col = contract.id_column
         label_col = contract.label_column
         group_col = contract.group_column
-
-        # Build backend
-        backend = build_backend(model_id)
 
         # Load dataset and corresponding backend transform
         transform = backend.get_transform()
@@ -194,15 +209,76 @@ def main():
         )
         dataset_loading_seconds = perf_counter() - load_start
 
-        # Extract embeddings
-        embedding_start = perf_counter()
-        embeddings, image_paths, source = extract_embeddings(
+        # Freeze the evaluation cohort before any image is decoded or embedded.
+        available_source_paths = list(dataloader.dataset.image_paths)
+        available_source_ids = sample_ids_from_paths(
+            dataset_name, available_source_paths
+        )
+        manifest_metadata = metadata_df
+        manifest_available_ids = available_source_ids
+        if dataset_name == "odir":
+            manifest_metadata = prepare_odir_patient_metadata(metadata_df)
+            manifest_available_ids = manifest_metadata[id_col].astype(str).tolist()
+
+        evaluation_metadata, fold_assignments, manifest_info = (
+            prepare_experiment_manifest(
+                manifest_metadata,
+                model_id=model_id,
+                dataset_name=dataloader.dataset_name,
+                id_col=id_col,
+                label_col=label_col,
+                manifest_dir=manifest_dir,
+                group_col=group_col,
+                max_samples=max_samples,
+                sample_seed=sample_seed,
+                n_splits=outer_folds,
+                fold_seed=fold_seed,
+                available_sample_ids=manifest_available_ids,
+            )
+        )
+        selected_evaluation_ids = evaluation_metadata[id_col].astype(str).tolist()
+        extraction_metadata = metadata_df
+        selected_source_ids = selected_evaluation_ids
+        if dataset_name == "odir":
+            eye_rows = metadata_df.copy()
+            eye_rows[id_col] = eye_rows[id_col].astype(str)
+            eye_rows["filename"] = eye_rows["filename"].astype(str)
+            selected_source_ids = []
+            for patient_id in selected_evaluation_ids:
+                patient_rows = eye_rows[eye_rows[id_col] == patient_id]
+                if len(patient_rows) != 2 or set(patient_rows["eye"]) != {"left", "right"}:
+                    raise ValueError(
+                        f"Selected ODIR patient {patient_id} lacks a complete eye pair."
+                    )
+                selected_source_ids.extend(
+                    patient_rows.set_index("eye").loc[["left", "right"], "filename"]
+                    .astype(str).tolist()
+                )
+            indexed_eyes = eye_rows.set_index("filename", drop=False)
+            extraction_metadata = indexed_eyes.loc[selected_source_ids].reset_index(drop=True)
+
+        dataloader = subset_dataloader(
+            dataloader,
+            selected_source_ids,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+        )
+        print(
+            f"Using {len(evaluation_metadata)} samples from reproducibility manifest: "
+            f"{manifest_info['path']}"
+        )
+
+        # Extract only the frozen source-image cohort.
+        reset_peak_memory(backend)
+        embeddings, image_paths, source, embedding_timing = extract_embeddings(
             dataloader,
             backend,
             normalize = normalize_embeddings,
-            cache = cache_embeddings
+            cache = cache_embeddings,
+            return_runtime = True,
         )
-        embedding_seconds = perf_counter() - embedding_start
+        embedding_seconds = embedding_timing["total_seconds"]
         if len(embeddings) != len(image_paths):
             raise ValueError("Embedding and image-path counts do not match.")
 
@@ -215,7 +291,6 @@ def main():
             "aggregation": "none",
         }
         evaluation_embeddings = source_embedding_array
-        evaluation_metadata = metadata_df
         evaluation_paths = image_paths
         evaluation_sample_ids = source_sample_ids
         if dataset_name == "odir":
@@ -226,34 +301,15 @@ def main():
                 evaluation_audit,
             ) = pool_odir_patient_embeddings(
                 source_embedding_array,
-                metadata_df,
+                extraction_metadata,
                 image_paths,
                 normalize=normalize_embeddings,
             )
             # Evaluation functions use explicit sample IDs; these references are
             # never opened as files.
             evaluation_paths = list(evaluation_sample_ids)
-
-        evaluation_metadata, fold_assignments, manifest_info = (
-            prepare_experiment_manifest(
-                evaluation_metadata,
-                model_id=model_id,
-                dataset_name=dataloader.dataset_name,
-                id_col=id_col,
-                label_col=label_col,
-                manifest_dir=manifest_dir,
-                group_col=group_col,
-                max_samples=max_samples,
-                sample_seed=sample_seed,
-                n_splits=outer_folds,
-                fold_seed=fold_seed,
-                available_sample_ids=evaluation_sample_ids,
-            )
-        )
-        print(
-            f"Using {len(evaluation_metadata)} samples from reproducibility manifest: "
-            f"{manifest_info['path']}"
-        )
+        if set(evaluation_sample_ids) != set(selected_evaluation_ids):
+            raise ValueError("Extracted evaluation IDs do not match the frozen manifest.")
 
         # Run benchmark suite
         results = run_benchmark(
@@ -274,6 +330,10 @@ def main():
                 run_folder, "retrieval", dataset_name
             ),
             retrieval_path_prefix = os.path.join("retrieval", dataset_name),
+            clustering_output_dir = os.path.join(
+                run_folder, "clustering", dataset_name
+            ),
+            clustering_path_prefix = os.path.join("clustering", dataset_name),
         )
 
         emb_array = np.asarray(evaluation_embeddings)
@@ -297,10 +357,23 @@ def main():
         results["data_audit"]["evaluation"] = evaluation_audit
         results["reproducibility"] = manifest_info
         results["run_provenance"] = run_provenance
+        results["execution"] = collect_backend_execution_metadata(backend)
         
         results["runtime"]["stages"]["dataset_loading"] = dataset_loading_seconds
         results["runtime"]["stages"]["embedding_extraction"] = embedding_seconds
+        results["runtime"]["stages"][
+            "model_loading_once_per_model"
+        ] = backend_loading_seconds
         results["runtime"]["stages"]["total_dataset_run"] = perf_counter() - dataset_start
+        results["runtime"]["embedding"] = build_embedding_runtime(
+            embedding_seconds,
+            int(source_embedding_array.shape[0]),
+            batch_size,
+            num_workers,
+            source,
+            timing_components=embedding_timing,
+        )
+        results["runtime"]["peak_memory"] = collect_peak_memory(backend)
 
         # Save results
         results_path = os.path.join(run_folder, f"{dataset_name}.json")
@@ -351,6 +424,12 @@ def main():
                     retrieval_path_prefix=os.path.join(
                         "retrieval", "chexpert_sensitivity", policy
                     ),
+                    clustering_output_dir=os.path.join(
+                        run_folder, "clustering", "chexpert_sensitivity", policy
+                    ),
+                    clustering_path_prefix=os.path.join(
+                        "clustering", "chexpert_sensitivity", policy
+                    ),
                 )
                 label_fingerprint = build_dataset_fingerprint(
                     sensitivity_ids,
@@ -367,6 +446,7 @@ def main():
                 }
                 sensitivity_results["reproducibility"] = deepcopy(manifest_info)
                 sensitivity_results["run_provenance"] = run_provenance
+                sensitivity_results["execution"] = deepcopy(results["execution"])
                 sensitivity_results["sensitivity_analysis"] = {
                     "primary_uncertainty_policy": chexpert_uncertainty_policy,
                     "uncertainty_policy": policy,

@@ -5,6 +5,7 @@ This file contains the functions for loading the datasets.
 """
 
 import os
+from copy import deepcopy
 import numpy as np
 import pandas as pd
 import kagglehub
@@ -317,6 +318,52 @@ def custom_collate_function(batch):
             batched_images = list(images)
 
         return batched_images, list(paths)
+
+
+def subset_dataloader(dataloader, selected_sample_ids, batch_size, shuffle=False,
+                      num_workers=0):
+    """Rebuild a loader for an exact, ordered cohort before image decoding."""
+    if not isinstance(batch_size, int) or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer.")
+    if not isinstance(num_workers, int) or num_workers < 0:
+        raise ValueError("num_workers must be a nonnegative integer.")
+
+    dataset_name = dataloader.dataset_name
+    contract = get_dataset_contract(dataset_name)
+    requested = [str(sample_id) for sample_id in selected_sample_ids]
+    if not requested or len(set(requested)) != len(requested):
+        raise ValueError("Selected sample IDs must be nonempty and unique.")
+
+    source_paths = list(dataloader.dataset.image_paths)
+    source_ids = [contract.sample_id_from_path(path) for path in source_paths]
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("Source image paths do not map to unique sample IDs.")
+    path_by_id = dict(zip(source_ids, source_paths))
+    missing = [sample_id for sample_id in requested if sample_id not in path_by_id]
+    if missing:
+        raise ValueError(f"Selected samples are missing image files: {missing[:5]}")
+
+    selected_paths = [path_by_id[sample_id] for sample_id in requested]
+    selected_dataset = GeneralDataset(
+        dataloader.dataset.metadata_df,
+        selected_paths,
+        dataloader.dataset.transform,
+    )
+    selected_loader = DataLoader(
+        selected_dataset,
+        batch_size,
+        shuffle,
+        collate_fn=custom_collate_function,
+        num_workers=num_workers,
+    )
+    selected_loader.dataset_name = dataset_name
+    selected_loader.data_audit = deepcopy(dataloader.data_audit)
+    selected_loader.data_audit["extraction_cohort"] = {
+        "selection_applied_before_image_decoding": True,
+        "source_image_count": int(len(source_paths)),
+        "selected_image_count": int(len(selected_paths)),
+    }
+    return selected_loader
 
 # Function to effectively load datasets based on their structure
 def load_dataset(dataset_name, transform = None, batch_size = 32, shuffle = False,
