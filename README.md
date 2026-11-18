@@ -82,9 +82,13 @@ reporting: process-visible CPU and memory resources, optional GPU inventory,
 framework-observed device evidence, cache status, embedding throughput, and peak
 memory when supported. Missing HPC/container interfaces are recorded as unavailable
 rather than treated as evidence of CPU or GPU execution.
-The frozen manifest cohort is applied before image decoding and inference; embedding
-timing separately records computation, cache reads, cache writes, and overhead.
+Every eligible image is embedded and optionally cached before the frozen manifest
+selects the capped evaluation cohort. Embedding timing therefore covers the full
+eligible source set and separately records computation, cache reads, cache writes,
+and overhead.
 Repeated K-means sample assignments are saved as validated compressed artifacts.
+HAM10000 and CheXpert also run cohort-selection sensitivities at seeds 43, 44, and
+45 by default, reusing the full embedding bank while retaining seed 42 as primary.
 
 ## Statistical input validation
 

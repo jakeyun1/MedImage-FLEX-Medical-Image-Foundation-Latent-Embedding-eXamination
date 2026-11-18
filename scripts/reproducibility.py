@@ -16,6 +16,179 @@ from scripts.dataset_contracts import get_dataset_contract
 
 PROHIBITED_CHARS = ["\\", "/", ":", "*", "?", "\"", "<", ">", "|"]
 MANIFEST_SCHEMA_VERSION = 4
+COHORT_SENSITIVITY_SCHEMA_VERSION = 1
+DEFAULT_COHORT_SENSITIVITY_SEEDS = (43, 44, 45)
+COHORT_SENSITIVITY_DATASETS = ("ham10000", "chexpert")
+
+
+def validate_cohort_sensitivity_seeds(primary_seed, sensitivity_seeds):
+    """Validate deterministic, non-overlapping cohort sensitivity seeds."""
+    if not isinstance(primary_seed, int) or isinstance(primary_seed, bool) or primary_seed < 0:
+        raise ValueError("reproducibility.sample_seed must be a nonnegative integer.")
+    if not isinstance(sensitivity_seeds, list):
+        raise ValueError("reproducibility.cohort_sensitivity_seeds must be a JSON list.")
+    if any(
+        not isinstance(seed, int) or isinstance(seed, bool) or seed < 0
+        for seed in sensitivity_seeds
+    ):
+        raise ValueError("Cohort sensitivity seeds must be nonnegative integers.")
+    if len(sensitivity_seeds) != len(set(sensitivity_seeds)):
+        raise ValueError("Cohort sensitivity seeds must be unique.")
+    if primary_seed in sensitivity_seeds:
+        raise ValueError("The primary sample seed cannot also be a sensitivity seed.")
+    return tuple(sensitivity_seeds)
+
+
+def cohort_overlap_summary(primary_sample_ids, sensitivity_sample_ids):
+    """Return exact overlap evidence for two unique manifest cohorts."""
+    primary = [str(sample_id) for sample_id in primary_sample_ids]
+    sensitivity = [str(sample_id) for sample_id in sensitivity_sample_ids]
+    if not primary or not sensitivity:
+        raise ValueError("Cohort overlap requires two nonempty sample-ID lists.")
+    if len(primary) != len(set(primary)) or len(sensitivity) != len(set(sensitivity)):
+        raise ValueError("Cohort overlap sample IDs must be unique.")
+    intersection = len(set(primary) & set(sensitivity))
+    union = len(set(primary) | set(sensitivity))
+    return {
+        "primary_n_samples": int(len(primary)),
+        "sensitivity_n_samples": int(len(sensitivity)),
+        "intersection_n_samples": int(intersection),
+        "union_n_samples": int(union),
+        "primary_retained_fraction": float(intersection / len(primary)),
+        "jaccard_index": float(intersection / union),
+        "identical_sample_set": set(primary) == set(sensitivity),
+    }
+
+
+def cohort_seed_tag(seed):
+    if not isinstance(seed, int) or isinstance(seed, bool) or seed < 0:
+        raise ValueError("Cohort seed must be a nonnegative integer.")
+    return f"seed_{seed:010d}"
+
+
+def validate_cohort_selection_record(record):
+    """Fail closed on malformed primary or sensitivity cohort metadata."""
+    if not isinstance(record, dict):
+        raise ValueError("Cohort selection metadata must be an object.")
+    common = {
+        "schema_version", "analysis_type", "role", "primary_sample_seed",
+        "sample_seed", "sensitivity_sample_seeds", "max_samples",
+        "n_eligible_samples", "n_selected_samples", "manifest_sha256",
+        "manifest_applied_after_full_embedding_extraction", "fold_seed",
+        "evaluation_seed", "outer_folds",
+    }
+    sensitivity_only = {
+        "primary_manifest_sha256", "full_embedding_bank_reused",
+        "additional_embedding_extraction", "overlap_with_primary",
+        "primary_n_selected_samples",
+    }
+    role = record.get("role")
+    expected = common if role == "primary" else common | sensitivity_only
+    if role not in {"primary", "sensitivity"} or set(record) != expected:
+        raise ValueError("Cohort selection metadata fields do not match its role.")
+    if record["schema_version"] != COHORT_SENSITIVITY_SCHEMA_VERSION:
+        raise ValueError("Cohort selection schema version is incompatible.")
+    if record["analysis_type"] != "cohort_sampling":
+        raise ValueError("Cohort selection analysis type is invalid.")
+    primary_seed = record["primary_sample_seed"]
+    sensitivity_seeds = validate_cohort_sensitivity_seeds(
+        primary_seed, record["sensitivity_sample_seeds"]
+    )
+    sample_seed = record["sample_seed"]
+    if role == "primary" and sample_seed != primary_seed:
+        raise ValueError("Primary cohort selection must use the primary sample seed.")
+    if role == "sensitivity" and sample_seed not in sensitivity_seeds:
+        raise ValueError("Sensitivity cohort seed is not declared in its seed family.")
+    for key in ("fold_seed", "evaluation_seed"):
+        if not isinstance(record[key], int) or isinstance(record[key], bool) or record[key] < 0:
+            raise ValueError(f"Cohort selection {key} must be a nonnegative integer.")
+    if (
+        not isinstance(record["outer_folds"], int)
+        or isinstance(record["outer_folds"], bool)
+        or record["outer_folds"] < 2
+    ):
+        raise ValueError("Cohort selection outer_folds must be an integer of at least 2.")
+    for key in ("n_eligible_samples", "n_selected_samples"):
+        if not isinstance(record[key], int) or isinstance(record[key], bool) or record[key] < 1:
+            raise ValueError(f"Cohort selection {key} must be a positive integer.")
+    if record["n_selected_samples"] > record["n_eligible_samples"]:
+        raise ValueError("Selected cohort size cannot exceed eligible sample count.")
+    if record["max_samples"] is not None and (
+        not isinstance(record["max_samples"], int)
+        or isinstance(record["max_samples"], bool)
+        or record["max_samples"] < 1
+    ):
+        raise ValueError("Cohort max_samples must be null or a positive integer.")
+    for key in ("manifest_sha256",):
+        value = record[key]
+        if not isinstance(value, str) or len(value) != 64:
+            raise ValueError(f"Cohort selection {key} must be a SHA-256 string.")
+    if record["manifest_applied_after_full_embedding_extraction"] is not True:
+        raise ValueError("Cohort selection must follow full embedding extraction.")
+    if role == "sensitivity":
+        if not isinstance(record["primary_manifest_sha256"], str) or len(
+            record["primary_manifest_sha256"]
+        ) != 64:
+            raise ValueError("Primary manifest SHA-256 is invalid.")
+        if record["full_embedding_bank_reused"] is not True:
+            raise ValueError("Sensitivity cohorts must reuse the full embedding bank.")
+        if record["additional_embedding_extraction"] is not False:
+            raise ValueError("Sensitivity cohorts cannot report additional extraction.")
+        overlap = record["overlap_with_primary"]
+        if not isinstance(overlap, dict):
+            raise ValueError("Sensitivity cohort overlap metadata is missing.")
+        if overlap.get("primary_n_samples") != record["primary_n_selected_samples"]:
+            raise ValueError("Sensitivity overlap primary count is inconsistent.")
+        if overlap.get("sensitivity_n_samples") != record["n_selected_samples"]:
+            raise ValueError("Sensitivity overlap sample count is inconsistent.")
+    return True
+
+
+def validate_cohort_sensitivity_index(index):
+    """Validate the per-model, per-dataset cohort sensitivity index."""
+    required = {
+        "schema_version", "analysis_type", "dataset", "model_id",
+        "primary_sample_seed", "sensitivity_sample_seeds", "max_samples",
+        "embedding_bank", "primary", "sensitivities", "fold_seed",
+        "evaluation_seed", "outer_folds",
+    }
+    if not isinstance(index, dict) or set(index) != required:
+        raise ValueError("Cohort sensitivity index fields are invalid.")
+    if index["schema_version"] != COHORT_SENSITIVITY_SCHEMA_VERSION:
+        raise ValueError("Cohort sensitivity index schema is incompatible.")
+    if index["analysis_type"] != "cohort_sampling_sensitivity":
+        raise ValueError("Cohort sensitivity index analysis type is invalid.")
+    if not str(index["dataset"]).strip() or not str(index["model_id"]).strip():
+        raise ValueError("Cohort sensitivity dataset and model must be nonempty.")
+    seeds = validate_cohort_sensitivity_seeds(
+        index["primary_sample_seed"], index["sensitivity_sample_seeds"]
+    )
+    for key in ("fold_seed", "evaluation_seed"):
+        if not isinstance(index[key], int) or isinstance(index[key], bool) or index[key] < 0:
+            raise ValueError(f"Cohort sensitivity index {key} is invalid.")
+    if (
+        not isinstance(index["outer_folds"], int)
+        or isinstance(index["outer_folds"], bool)
+        or index["outer_folds"] < 2
+    ):
+        raise ValueError("Cohort sensitivity index outer_folds is invalid.")
+    entries = index["sensitivities"]
+    if not isinstance(entries, list) or [entry.get("sample_seed") for entry in entries] != list(seeds):
+        raise ValueError("Cohort sensitivity index entries do not match configured seeds.")
+    if index["embedding_bank"].get("reused_for_every_cohort") is not True:
+        raise ValueError("Cohort sensitivity index must document embedding reuse.")
+    if index["embedding_bank"].get("additional_embedding_extraction_per_seed") is not False:
+        raise ValueError("Cohort sensitivity index cannot report per-seed extraction.")
+    for entry in entries:
+        expected_tag = cohort_seed_tag(entry["sample_seed"])
+        result_path = str(entry.get("result_path", "")).replace("\\", "/")
+        if not result_path.endswith(f"/{expected_tag}.json"):
+            raise ValueError("Cohort sensitivity result path does not match its seed.")
+        if not isinstance(entry.get("manifest_sha256"), str) or len(
+            entry["manifest_sha256"]
+        ) != 64:
+            raise ValueError("Cohort sensitivity manifest SHA-256 is invalid.")
+    return True
 
 def _clean_filename(filename, desired_char):
         """

@@ -121,6 +121,9 @@ def main():
     if max_samples is not None:
         max_samples = int(max_samples)
     sample_seed = int(reproducibility_cfg.get("sample_seed", 42))
+    cohort_sensitivity_seeds_raw = reproducibility_cfg.get(
+        "cohort_sensitivity_seeds", [43, 44, 45]
+    )
     fold_seed = int(reproducibility_cfg.get("fold_seed", 42))
     evaluation_seed = int(reproducibility_cfg.get("evaluation_seed", 42))
     outer_folds = int(reproducibility_cfg.get("outer_folds", 5))
@@ -148,7 +151,6 @@ def main():
     from scripts.dataloading import (
         _apply_chexpert_uncertainty_policy,
         load_dataset,
-        subset_dataloader,
         validate_chexpert_uncertainty_policies,
     )
     from scripts.data_audit import ordered_ids_sha256
@@ -157,11 +159,20 @@ def main():
     from scripts.label_prior_baseline import run_label_prior_baselines
     from scripts.odir import (
         pool_odir_patient_embeddings,
-        prepare_odir_patient_metadata,
     )
     from scripts.permuted_baseline import run_permuted_baseline
     from scripts.random_baseline import run_random_baseline
-    from scripts.reproducibility import prepare_experiment_manifest, sample_ids_from_paths
+    from scripts.reproducibility import (
+        COHORT_SENSITIVITY_DATASETS,
+        COHORT_SENSITIVITY_SCHEMA_VERSION,
+        cohort_overlap_summary,
+        cohort_seed_tag,
+        prepare_experiment_manifest,
+        sample_ids_from_paths,
+        validate_cohort_selection_record,
+        validate_cohort_sensitivity_index,
+        validate_cohort_sensitivity_seeds,
+    )
     from scripts.run_benchmark import run_benchmark
     from scripts.runtime_metadata import (
         build_embedding_runtime,
@@ -175,6 +186,9 @@ def main():
         validate_chexpert_uncertainty_policies(
             chexpert_uncertainty_policy, chexpert_sensitivity_policies
         )
+    )
+    cohort_sensitivity_seeds = validate_cohort_sensitivity_seeds(
+        sample_seed, cohort_sensitivity_seeds_raw
     )
 
     print(f"\n=== Running Benchmark: {model_name} ===")
@@ -209,67 +223,9 @@ def main():
         )
         dataset_loading_seconds = perf_counter() - load_start
 
-        # Freeze the evaluation cohort before any image is decoded or embedded.
-        available_source_paths = list(dataloader.dataset.image_paths)
-        available_source_ids = sample_ids_from_paths(
-            dataset_name, available_source_paths
-        )
-        manifest_metadata = metadata_df
-        manifest_available_ids = available_source_ids
-        if dataset_name == "odir":
-            manifest_metadata = prepare_odir_patient_metadata(metadata_df)
-            manifest_available_ids = manifest_metadata[id_col].astype(str).tolist()
-
-        evaluation_metadata, fold_assignments, manifest_info = (
-            prepare_experiment_manifest(
-                manifest_metadata,
-                model_id=model_id,
-                dataset_name=dataloader.dataset_name,
-                id_col=id_col,
-                label_col=label_col,
-                manifest_dir=manifest_dir,
-                group_col=group_col,
-                max_samples=max_samples,
-                sample_seed=sample_seed,
-                n_splits=outer_folds,
-                fold_seed=fold_seed,
-                available_sample_ids=manifest_available_ids,
-            )
-        )
-        selected_evaluation_ids = evaluation_metadata[id_col].astype(str).tolist()
-        extraction_metadata = metadata_df
-        selected_source_ids = selected_evaluation_ids
-        if dataset_name == "odir":
-            eye_rows = metadata_df.copy()
-            eye_rows[id_col] = eye_rows[id_col].astype(str)
-            eye_rows["filename"] = eye_rows["filename"].astype(str)
-            selected_source_ids = []
-            for patient_id in selected_evaluation_ids:
-                patient_rows = eye_rows[eye_rows[id_col] == patient_id]
-                if len(patient_rows) != 2 or set(patient_rows["eye"]) != {"left", "right"}:
-                    raise ValueError(
-                        f"Selected ODIR patient {patient_id} lacks a complete eye pair."
-                    )
-                selected_source_ids.extend(
-                    patient_rows.set_index("eye").loc[["left", "right"], "filename"]
-                    .astype(str).tolist()
-                )
-            indexed_eyes = eye_rows.set_index("filename", drop=False)
-            extraction_metadata = indexed_eyes.loc[selected_source_ids].reset_index(drop=True)
-
-        dataloader = subset_dataloader(
-            dataloader,
-            selected_source_ids,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-        )
-        print(
-            f"Using {len(evaluation_metadata)} samples from reproducibility manifest: "
-            f"{manifest_info['path']}"
-        )
-
-        # Extract only the frozen source-image cohort.
+        # Extract and optionally cache every eligible source image. The frozen
+        # manifest is applied afterward so alternative evaluation seeds can reuse
+        # the same full embedding bank without rerunning the foundation model.
         reset_peak_memory(backend)
         embeddings, image_paths, source, embedding_timing = extract_embeddings(
             dataloader,
@@ -291,6 +247,7 @@ def main():
             "aggregation": "none",
         }
         evaluation_embeddings = source_embedding_array
+        evaluation_metadata = metadata_df
         evaluation_paths = image_paths
         evaluation_sample_ids = source_sample_ids
         if dataset_name == "odir":
@@ -301,15 +258,35 @@ def main():
                 evaluation_audit,
             ) = pool_odir_patient_embeddings(
                 source_embedding_array,
-                extraction_metadata,
+                metadata_df,
                 image_paths,
                 normalize=normalize_embeddings,
             )
             # Evaluation functions use explicit sample IDs; these references are
             # never opened as files.
             evaluation_paths = list(evaluation_sample_ids)
-        if set(evaluation_sample_ids) != set(selected_evaluation_ids):
-            raise ValueError("Extracted evaluation IDs do not match the frozen manifest.")
+
+        evaluation_metadata, fold_assignments, manifest_info = (
+            prepare_experiment_manifest(
+                evaluation_metadata,
+                model_id=model_id,
+                dataset_name=dataloader.dataset_name,
+                id_col=id_col,
+                label_col=label_col,
+                manifest_dir=manifest_dir,
+                group_col=group_col,
+                max_samples=max_samples,
+                sample_seed=sample_seed,
+                n_splits=outer_folds,
+                fold_seed=fold_seed,
+                available_sample_ids=evaluation_sample_ids,
+            )
+        )
+        print(
+            f"Extracted {len(source_embedding_array)} source-image embeddings; "
+            f"evaluating {len(evaluation_metadata)} manifest samples: "
+            f"{manifest_info['path']}"
+        )
 
         # Run benchmark suite
         results = run_benchmark(
@@ -349,6 +326,7 @@ def main():
                 evaluation_sample_ids
             ),
             "evaluation_unit": contract.evaluation_unit,
+            "extraction_scope": "all_eligible_source_images_before_manifest_selection",
             "source": source,
             "preprocessing": backend.preprocessing_spec,
             "preprocessing_sha256": preprocessing_fingerprint(backend),
@@ -356,6 +334,32 @@ def main():
         results["data_audit"] = dataloader.data_audit
         results["data_audit"]["evaluation"] = evaluation_audit
         results["reproducibility"] = manifest_info
+        applicable_cohort_sensitivity_seeds = (
+            list(cohort_sensitivity_seeds)
+            if (
+                dataset_name in COHORT_SENSITIVITY_DATASETS
+                and max_samples is not None
+                and manifest_info["n_eligible_samples"] > manifest_info["n_samples"]
+            )
+            else []
+        )
+        results["cohort_selection"] = {
+            "schema_version": COHORT_SENSITIVITY_SCHEMA_VERSION,
+            "analysis_type": "cohort_sampling",
+            "role": "primary",
+            "primary_sample_seed": int(sample_seed),
+            "sample_seed": int(sample_seed),
+            "fold_seed": int(fold_seed),
+            "evaluation_seed": int(evaluation_seed),
+            "outer_folds": int(outer_folds),
+            "sensitivity_sample_seeds": applicable_cohort_sensitivity_seeds,
+            "max_samples": max_samples,
+            "n_eligible_samples": int(manifest_info["n_eligible_samples"]),
+            "n_selected_samples": int(manifest_info["n_samples"]),
+            "manifest_sha256": manifest_info["sha256"],
+            "manifest_applied_after_full_embedding_extraction": True,
+        }
+        validate_cohort_selection_record(results["cohort_selection"])
         results["run_provenance"] = run_provenance
         results["execution"] = collect_backend_execution_metadata(backend)
         
@@ -372,6 +376,9 @@ def main():
             num_workers,
             source,
             timing_components=embedding_timing,
+        )
+        results["runtime"]["embedding"]["extraction_scope"] = (
+            "all_eligible_source_images_before_manifest_selection"
         )
         results["runtime"]["peak_memory"] = collect_peak_memory(backend)
 
@@ -445,6 +452,9 @@ def main():
                     "fingerprint": label_fingerprint,
                 }
                 sensitivity_results["reproducibility"] = deepcopy(manifest_info)
+                sensitivity_results["cohort_selection"] = deepcopy(
+                    results["cohort_selection"]
+                )
                 sensitivity_results["run_provenance"] = run_provenance
                 sensitivity_results["execution"] = deepcopy(results["execution"])
                 sensitivity_results["sensitivity_analysis"] = {
@@ -468,6 +478,162 @@ def main():
                     sensitivity_results,
                     os.path.join(sensitivity_dir, f"{policy}.json"),
                 )
+
+        if applicable_cohort_sensitivity_seeds:
+            primary_manifest_ids = evaluation_metadata[id_col].astype(str).tolist()
+            cohort_sensitivity_dir = os.path.join(
+                run_folder, "cohort_sensitivity", dataset_name
+            )
+            os.makedirs(cohort_sensitivity_dir, exist_ok=True)
+            cohort_index = {
+                "schema_version": COHORT_SENSITIVITY_SCHEMA_VERSION,
+                "analysis_type": "cohort_sampling_sensitivity",
+                "dataset": dataset_name,
+                "model_id": model_id,
+                "primary_sample_seed": int(sample_seed),
+                "fold_seed": int(fold_seed),
+                "evaluation_seed": int(evaluation_seed),
+                "outer_folds": int(outer_folds),
+                "sensitivity_sample_seeds": applicable_cohort_sensitivity_seeds,
+                "max_samples": max_samples,
+                "embedding_bank": {
+                    "reused_for_every_cohort": True,
+                    "additional_embedding_extraction_per_seed": False,
+                    "n_source_image_embeddings": int(source_embedding_array.shape[0]),
+                    "n_available_evaluation_embeddings": int(
+                        np.asarray(evaluation_embeddings).shape[0]
+                    ),
+                    "embedding_dim": int(emb_array.shape[1]),
+                    "ordered_source_image_ids_sha256": results["embedding_info"][
+                        "ordered_source_image_ids_sha256"
+                    ],
+                    "ordered_evaluation_ids_sha256": results["embedding_info"][
+                        "ordered_evaluation_ids_sha256"
+                    ],
+                    "preprocessing_sha256": results["embedding_info"][
+                        "preprocessing_sha256"
+                    ],
+                },
+                "primary": {
+                    "sample_seed": int(sample_seed),
+                    "result_path": f"{dataset_name}.json",
+                    "manifest_sha256": manifest_info["sha256"],
+                    "n_samples": int(manifest_info["n_samples"]),
+                },
+                "sensitivities": [],
+            }
+
+            for sensitivity_seed in applicable_cohort_sensitivity_seeds:
+                cohort_start = perf_counter()
+                (
+                    cohort_metadata,
+                    cohort_folds,
+                    cohort_manifest_info,
+                ) = prepare_experiment_manifest(
+                    metadata_df,
+                    model_id=model_id,
+                    dataset_name=dataloader.dataset_name,
+                    id_col=id_col,
+                    label_col=label_col,
+                    manifest_dir=manifest_dir,
+                    group_col=group_col,
+                    max_samples=max_samples,
+                    sample_seed=sensitivity_seed,
+                    n_splits=outer_folds,
+                    fold_seed=fold_seed,
+                    available_sample_ids=evaluation_sample_ids,
+                )
+                cohort_ids = cohort_metadata[id_col].astype(str).tolist()
+                overlap = cohort_overlap_summary(primary_manifest_ids, cohort_ids)
+                seed_tag = cohort_seed_tag(sensitivity_seed)
+                artifact_parts = ("cohort_sensitivity", dataset_name, seed_tag)
+
+                cohort_results = run_benchmark(
+                    dataset_name,
+                    evaluation_embeddings,
+                    cohort_metadata,
+                    evaluation_paths,
+                    id_col=id_col,
+                    label_col=label_col,
+                    outer_folds=cohort_folds,
+                    n_splits=outer_folds,
+                    random_state=evaluation_seed,
+                    group_col=group_col,
+                    sample_ids=evaluation_sample_ids,
+                    oof_output_dir=os.path.join(run_folder, "oof", *artifact_parts),
+                    oof_path_prefix=os.path.join("oof", *artifact_parts),
+                    retrieval_output_dir=os.path.join(
+                        run_folder, "retrieval", *artifact_parts
+                    ),
+                    retrieval_path_prefix=os.path.join("retrieval", *artifact_parts),
+                    clustering_output_dir=os.path.join(
+                        run_folder, "clustering", *artifact_parts
+                    ),
+                    clustering_path_prefix=os.path.join("clustering", *artifact_parts),
+                )
+                cohort_results["embedding_info"] = deepcopy(results["embedding_info"])
+                cohort_results["embedding_info"]["n_evaluated_embeddings"] = int(
+                    cohort_manifest_info["n_samples"]
+                )
+                cohort_results["data_audit"] = deepcopy(results["data_audit"])
+                cohort_results["reproducibility"] = cohort_manifest_info
+                cohort_results["cohort_selection"] = {
+                    "schema_version": COHORT_SENSITIVITY_SCHEMA_VERSION,
+                    "analysis_type": "cohort_sampling",
+                    "role": "sensitivity",
+                    "primary_sample_seed": int(sample_seed),
+                    "sample_seed": int(sensitivity_seed),
+                    "fold_seed": int(fold_seed),
+                    "evaluation_seed": int(evaluation_seed),
+                    "outer_folds": int(outer_folds),
+                    "sensitivity_sample_seeds": applicable_cohort_sensitivity_seeds,
+                    "max_samples": max_samples,
+                    "n_eligible_samples": int(
+                        cohort_manifest_info["n_eligible_samples"]
+                    ),
+                    "n_selected_samples": int(cohort_manifest_info["n_samples"]),
+                    "manifest_sha256": cohort_manifest_info["sha256"],
+                    "primary_manifest_sha256": manifest_info["sha256"],
+                    "primary_n_selected_samples": int(manifest_info["n_samples"]),
+                    "manifest_applied_after_full_embedding_extraction": True,
+                    "full_embedding_bank_reused": True,
+                    "additional_embedding_extraction": False,
+                    "overlap_with_primary": overlap,
+                }
+                validate_cohort_selection_record(
+                    cohort_results["cohort_selection"]
+                )
+                cohort_results["run_provenance"] = run_provenance
+                cohort_results["execution"] = deepcopy(results["execution"])
+                cohort_results["runtime"]["embedding_reuse"] = {
+                    "full_embedding_bank_reused": True,
+                    "additional_embedding_extraction_seconds": 0.0,
+                    "source_primary_sample_seed": int(sample_seed),
+                }
+                cohort_results["runtime"]["stages"][
+                    "total_cohort_sensitivity_run"
+                ] = perf_counter() - cohort_start
+
+                result_filename = f"{seed_tag}.json"
+                write_json(
+                    cohort_results,
+                    os.path.join(cohort_sensitivity_dir, result_filename),
+                )
+                cohort_index["sensitivities"].append({
+                    "sample_seed": int(sensitivity_seed),
+                    "result_path": os.path.join(
+                        "cohort_sensitivity", dataset_name, result_filename
+                    ),
+                    "manifest_sha256": cohort_manifest_info["sha256"],
+                    "n_samples": int(cohort_manifest_info["n_samples"]),
+                    "overlap_with_primary": overlap,
+                })
+
+            validate_cohort_sensitivity_index(cohort_index)
+            write_json(
+                cohort_index,
+                os.path.join(cohort_sensitivity_dir, "index.json"),
+            )
 
         if run_random_embeddings:
             run_random_baseline(

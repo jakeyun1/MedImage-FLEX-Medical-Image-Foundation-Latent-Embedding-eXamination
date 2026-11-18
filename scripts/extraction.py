@@ -52,14 +52,28 @@ def _cache_paths(dataloader, backend, normalize):
     )
     _require_unique_sample_ids(cohort_ids, "Cache cohort")
     cohort_sha256 = ordered_ids_sha256(cohort_ids)
-    filename = (
+    legacy_filename = (
         f"{backend.model_id}+{dataloader.dataset_name}+"
-        f"pre-{preprocessing_sha256[:12]}+cohort-{cohort_sha256[:12]}"
+        f"pre-{preprocessing_sha256[:12]}"
     )
+    legacy_filename = _clean_filename(legacy_filename, "-").replace(".", "")
+    filename = f"{legacy_filename}+cohort-{cohort_sha256[:12]}"
     filename = _clean_filename(filename, "-").replace(".", "")
     normalization = "normalized" if normalize else "unnormalized"
     base_path = f".{os.sep}embeddings{os.sep}{filename}-{normalization}"
-    return f"{base_path}.npz", f".{os.sep}embeddings{os.sep}{filename}.npy"
+    legacy_base = f".{os.sep}embeddings{os.sep}{legacy_filename}"
+    return f"{base_path}.npz", f"{legacy_base}.npy"
+
+
+def _precohort_cache_path(dataloader, backend, normalize):
+    preprocessing_sha256 = preprocessing_fingerprint(backend)
+    filename = (
+        f"{backend.model_id}+{dataloader.dataset_name}+"
+        f"pre-{preprocessing_sha256[:12]}"
+    )
+    filename = _clean_filename(filename, "-").replace(".", "")
+    normalization = "normalized" if normalize else "unnormalized"
+    return f".{os.sep}embeddings{os.sep}{filename}-{normalization}.npz"
 
 
 def _sample_ids(dataset_name, image_paths):
@@ -202,6 +216,7 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False,
     compute_seconds = 0.0
     cache_write_seconds = 0.0
     filepath, legacy_filepath = _cache_paths(dataloader, backend, normalize)
+    precohort_filepath = _precohort_cache_path(dataloader, backend, normalize)
     preprocessing_sha256 = preprocessing_fingerprint(backend)
 
     if cache and os.path.exists(filepath):
@@ -216,6 +231,38 @@ def extract_embeddings(dataloader, backend, normalize=True, cache=False,
             "compute_seconds": 0.0,
             "cache_read_seconds": float(cache_read_seconds),
             "cache_write_seconds": 0.0,
+        }
+        result = (embeddings, image_paths, "cache")
+        return (*result, runtime) if return_runtime else result
+
+    if cache and os.path.exists(precohort_filepath):
+        print(
+            "Validated pre-cohort embedding cache detected! "
+            f"Loading '{os.path.abspath(precohort_filepath)}'"
+        )
+        cache_read_start = perf_counter()
+        embeddings, image_paths = _load_embedding_cache(
+            precohort_filepath, dataloader, backend, normalize
+        )
+        cache_read_seconds = perf_counter() - cache_read_start
+        sample_ids = _sample_ids(dataloader.dataset_name, image_paths)
+        cache_write_start = perf_counter()
+        _write_embedding_cache(
+            filepath,
+            embeddings,
+            sample_ids,
+            dataloader.dataset_name,
+            backend.model_id,
+            preprocessing_sha256,
+            normalize,
+        )
+        cache_write_seconds = perf_counter() - cache_write_start
+        print(f"Embedding cache migrated to: {os.path.abspath(filepath)}\n")
+        runtime = {
+            "total_seconds": float(perf_counter() - total_start),
+            "compute_seconds": 0.0,
+            "cache_read_seconds": float(cache_read_seconds),
+            "cache_write_seconds": float(cache_write_seconds),
         }
         result = (embeddings, image_paths, "cache")
         return (*result, runtime) if return_runtime else result

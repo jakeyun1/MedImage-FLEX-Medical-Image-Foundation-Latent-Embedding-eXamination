@@ -2,9 +2,18 @@ import os
 import tempfile
 import unittest
 
+import numpy as np
 import pandas as pd
 
-from scripts.reproducibility import prepare_experiment_manifest
+from scripts.reproducibility import (
+    cohort_overlap_summary,
+    cohort_seed_tag,
+    prepare_experiment_manifest,
+    validate_cohort_selection_record,
+    validate_cohort_sensitivity_index,
+    validate_cohort_sensitivity_seeds,
+)
+from scripts.tests import prepare_data_multiclass
 
 
 def _metadata(group_sizes):
@@ -95,6 +104,125 @@ class ExperimentManifestTests(unittest.TestCase):
         self.assertEqual(len(selected), len(self.metadata))
         self.assertEqual(info["selection_method"], "all_eligible_samples")
         self.assertIsNone(info["sample_target_deviation"])
+
+    def test_different_seeds_reuse_one_full_embedding_bank(self):
+        first, _, _ = self._prepare(
+            os.path.join(self.temporary_directory.name, "seed-17"),
+            sample_seed=17,
+        )
+        second, _, _ = self._prepare(
+            os.path.join(self.temporary_directory.name, "seed-18"),
+            sample_seed=18,
+        )
+        self.assertNotEqual(set(first["sample_id"]), set(second["sample_id"]))
+
+        full_ids = self.metadata["sample_id"].tolist()
+        full_embeddings = np.arange(
+            len(full_ids) * 2, dtype=np.float32
+        ).reshape(len(full_ids), 2)
+        id_to_row = {sample_id: index for index, sample_id in enumerate(full_ids)}
+        for selected in (first, second):
+            X, _, _ = prepare_data_multiclass(
+                "pad_ufes",
+                full_embeddings,
+                selected,
+                full_ids,
+                "sample_id",
+                "label",
+                sample_ids=full_ids,
+            )
+            expected = full_embeddings[
+                [id_to_row[sample_id] for sample_id in selected["sample_id"]]
+            ]
+            np.testing.assert_array_equal(X, expected)
+
+    def test_cohort_sensitivity_seed_configuration_is_strict(self):
+        self.assertEqual(
+            validate_cohort_sensitivity_seeds(42, [43, 44, 45]),
+            (43, 44, 45),
+        )
+        with self.assertRaisesRegex(ValueError, "cannot also"):
+            validate_cohort_sensitivity_seeds(42, [42, 43])
+        with self.assertRaisesRegex(ValueError, "unique"):
+            validate_cohort_sensitivity_seeds(42, [43, 43])
+        with self.assertRaisesRegex(ValueError, "nonnegative integers"):
+            validate_cohort_sensitivity_seeds(42, [43, -1])
+        with self.assertRaisesRegex(ValueError, "JSON list"):
+            validate_cohort_sensitivity_seeds(42, (43, 44))
+
+    def test_cohort_overlap_schema_is_exact(self):
+        summary = cohort_overlap_summary(
+            ["a", "b", "c", "d"], ["b", "c", "d", "e"]
+        )
+        self.assertEqual(summary["intersection_n_samples"], 3)
+        self.assertEqual(summary["union_n_samples"], 5)
+        self.assertEqual(summary["primary_retained_fraction"], 0.75)
+        self.assertEqual(summary["jaccard_index"], 0.6)
+        self.assertFalse(summary["identical_sample_set"])
+        self.assertEqual(cohort_seed_tag(43), "seed_0000000043")
+
+    def test_cohort_sensitivity_output_schema_is_strict(self):
+        primary = {
+            "schema_version": 1,
+            "analysis_type": "cohort_sampling",
+            "role": "primary",
+            "primary_sample_seed": 42,
+            "sample_seed": 42,
+            "fold_seed": 42,
+            "evaluation_seed": 42,
+            "outer_folds": 5,
+            "sensitivity_sample_seeds": [43],
+            "max_samples": 5000,
+            "n_eligible_samples": 10,
+            "n_selected_samples": 4,
+            "manifest_sha256": "a" * 64,
+            "manifest_applied_after_full_embedding_extraction": True,
+        }
+        self.assertTrue(validate_cohort_selection_record(primary))
+
+        overlap = cohort_overlap_summary(["a", "b", "c", "d"], ["b", "c", "e"])
+        sensitivity = {
+            **primary,
+            "role": "sensitivity",
+            "sample_seed": 43,
+            "n_selected_samples": 3,
+            "manifest_sha256": "b" * 64,
+            "primary_manifest_sha256": "a" * 64,
+            "primary_n_selected_samples": 4,
+            "full_embedding_bank_reused": True,
+            "additional_embedding_extraction": False,
+            "overlap_with_primary": overlap,
+        }
+        self.assertTrue(validate_cohort_selection_record(sensitivity))
+
+        index = {
+            "schema_version": 1,
+            "analysis_type": "cohort_sampling_sensitivity",
+            "dataset": "chexpert",
+            "model_id": "fixture/model",
+            "primary_sample_seed": 42,
+            "fold_seed": 42,
+            "evaluation_seed": 42,
+            "outer_folds": 5,
+            "sensitivity_sample_seeds": [43],
+            "max_samples": 5000,
+            "embedding_bank": {
+                "reused_for_every_cohort": True,
+                "additional_embedding_extraction_per_seed": False,
+            },
+            "primary": {"sample_seed": 42},
+            "sensitivities": [{
+                "sample_seed": 43,
+                "result_path": (
+                    "cohort_sensitivity/chexpert/seed_0000000043.json"
+                ),
+                "manifest_sha256": "b" * 64,
+            }],
+        }
+        self.assertTrue(validate_cohort_sensitivity_index(index))
+        sensitivity["additional_embedding_extraction"] = True
+        with self.assertRaisesRegex(ValueError, "cannot report"):
+            validate_cohort_selection_record(sensitivity)
 
 
 if __name__ == "__main__":

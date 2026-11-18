@@ -7,6 +7,8 @@ import numpy as np
 from scripts.extraction import (
     CACHE_SCHEMA_VERSION,
     _cache_paths,
+    _precohort_cache_path,
+    _write_embedding_cache,
     extract_embeddings,
     preprocessing_fingerprint,
 )
@@ -233,6 +235,33 @@ class ExtractionCacheTests(unittest.TestCase):
         self.assertEqual(cached[2], "cache")
         self.assertEqual(cached[3]["compute_seconds"], 0)
         self.assertGreaterEqual(cached[3]["cache_read_seconds"], 0)
+
+    def test_validated_precohort_cache_is_migrated_without_inference(self):
+        paths = ["/data/a.jpg", "/data/b.jpg"]
+        loader = FakeDataLoader("ham10000", paths, [])
+        backend = FakeBackend([])
+        old_path = _precohort_cache_path(loader, backend, normalize=False)
+        current_path, _ = _cache_paths(loader, backend, normalize=False)
+        _write_embedding_cache(
+            old_path,
+            np.asarray([[1.0], [2.0]], dtype=np.float32),
+            ["a.jpg", "b.jpg"],
+            "ham10000",
+            backend.model_id,
+            preprocessing_fingerprint(backend),
+            False,
+        )
+
+        embeddings, aligned_paths, source, runtime = extract_embeddings(
+            loader, backend, normalize=False, cache=True, return_runtime=True
+        )
+        self.assertEqual(source, "cache")
+        self.assertEqual(backend.calls, 0)
+        self.assertEqual(aligned_paths, paths)
+        np.testing.assert_array_equal(embeddings[:, 0], [1.0, 2.0])
+        self.assertTrue(os.path.isfile(current_path))
+        self.assertEqual(runtime["compute_seconds"], 0)
+        self.assertGreaterEqual(runtime["cache_write_seconds"], 0)
 
 
 if __name__ == "__main__":

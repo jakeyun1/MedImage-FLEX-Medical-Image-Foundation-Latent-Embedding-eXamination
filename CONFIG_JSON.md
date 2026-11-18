@@ -74,6 +74,10 @@
                         (optional, default is manifests/),
         "sample_seed": Seed for stratified cohort selection
                        (optional, default is 42),
+        "cohort_sensitivity_seeds": Additional cohort-selection seeds for
+                       HAM10000 and CheXpert only. Seeds must be unique,
+                       nonnegative, and different from sample_seed
+                       (optional, default is [43, 44, 45]),
         "outer_folds": Number of outer cross-validation folds
                        (optional, default is 5),
         "fold_seed": Seed used to create outer folds
@@ -125,6 +129,7 @@
     "reproducibility": {
         "manifest_dir": "manifests",
         "sample_seed": 42,
+        "cohort_sensitivity_seeds": [43, 44, 45],
         "outer_folds": 5,
         "fold_seed": 42,
         "evaluation_seed": 42
@@ -136,6 +141,14 @@ CheXpert sensitivity results are saved as
 `<run_folder>/chexpert_sensitivity/<policy>.json`, with matched OOF and retrieval
 artifacts under their corresponding `chexpert_sensitivity/<policy>/` directories.
 They reuse the primary cohort manifest, outer folds, and extracted embeddings.
+
+Cohort-sampling sensitivities use seed 42 as the primary cohort and seeds 43, 44,
+and 45 by default for HAM10000 and CheXpert. They reuse the full embedding bank and
+do not rerun extraction. Results and an index are saved under
+`<run_folder>/cohort_sensitivity/<dataset>/`; aligned artifacts are saved under
+`oof/`, `retrieval/`, and `clustering/cohort_sensitivity/<dataset>/<seed_tag>/`.
+Every result contains a `cohort_selection` block with its role, exact seed, manifest
+hash, selected count, and overlap with the primary cohort.
 
 Clustering is part of every benchmark run. K-means uses 20 initializations and
 up to 500 iterations for each reported k. The class-count k is additionally fit
@@ -163,6 +176,12 @@ CBIS-DDSM, CheXpert, and ODIR, and complete lesion groups for HAM10000, whose
 metadata does not provide patient IDs. Later model runs with the same configuration
 validate and reuse that manifest. Every result records the manifest path and SHA-256
 checksum, along with the requested and actual cohort sizes.
+
+`dataset.max_samples` caps evaluation, not extraction. The benchmark first extracts
+and optionally caches embeddings for every eligible source image, then selects the
+manifest cohort for classification, retrieval, clustering, and inference. Changing
+`sample_seed` can therefore reuse the full embedding cache without rerunning the
+foundation model.
 
 MLP, KNN, and logistic-regression hyperparameters are all selected by maximizing
 macro F1 within the inner cross-validation folds. This gives each class or finding
@@ -207,9 +226,9 @@ result also records the framework-visible backend device, fresh-versus-cached
 embedding status, image throughput, model-loading time, and available peak RAM/VRAM
 measurements. Unavailable probes are reported as null or with an explicit reason;
 the benchmark does not infer a device from runtime alone.
-The manifest-selected cohort is applied before image decoding and inference. Runtime
-metadata separates fresh computation from cache read/write time and reports compute
-throughput only from the computation interval.
+Runtime metadata explicitly records full-eligible-set extraction separately from the
+capped evaluation sample count. It separates fresh computation from cache read/write
+time and reports compute throughput only from the computation interval.
 
 Retrieval reports Hit@K and Recall@K as distinct metrics. Hit@K is the fraction of
 eligible query-label units with at least one relevant candidate in the first K
